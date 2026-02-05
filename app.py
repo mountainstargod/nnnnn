@@ -3808,5 +3808,833 @@ def generate_events_from_params(acct, ref_date, anchor, intensity, params, party
             # We still pass current_label so the individual micro-tx rows are tagged correctly for training
             #rows.extend(_generate_micro_tx(t_prev, amt, cfg, ref_date=ref_date, label=current_label))
 
+
+    elif scenario_type == "biz_round_tripping":
+        # -----------------------------------------------
+        # FETCH SCENARIO CONFIG
+        # -----------------------------------------------
+        cfg = scenario_config['biz_round_tripping']
+        sampling_cfg = cfg['demographic_sampling']
+        multipliers = cfg['demographic_factors']
+
+        # -----------------------------------------------
+        # 2. ENTITY SAMPLING
+        # -----------------------------------------------
+        rs_cfg = sampling_cfg.get('RiskDistribution', {'alpha': 2.0, 'beta': 5.0, 'scale': 10.0})
+        raw_beta = np.random.beta(rs_cfg['alpha'], rs_cfg['beta'])
+        generated_risk_score = round(raw_beta * rs_cfg['scale'], 2)
+
+        # Helper function to handle flattened dictionary from Bayesian Optimization
+        def get_factor(source, actor_val):
+            # If it's the expected dict, do a lookup
+            if isinstance(source, dict):
+                return source.get(str(actor_val), 1.0)
+            # If it's a flattened number (like your debug showed), use it directly
+            if isinstance(source, (int, float)):
+                return float(source)
+            return 1.0
+            
         
+        entity = {
+            "EntityType": np.random.choice(sampling_cfg['EntityType']['choices'], p=sampling_cfg['EntityType']['probabilities']),
+            "EntitySize": np.random.choice(sampling_cfg['EntitySize']['choices'], p=sampling_cfg['EntitySize']['probabilities']),
+            "OwnershipType": np.random.choice(sampling_cfg['OwnershipType']['choices'], p=sampling_cfg['OwnershipType']['probabilities']),
+            "IndustrySector": np.random.choice(sampling_cfg['IndustrySector']['choices'], p=sampling_cfg['IndustrySector']['probabilities']),
+            "ComplexityLevel": np.random.randint(sampling_cfg['ComplexityLevel']['min'], sampling_cfg['ComplexityLevel']['max'] + 1),
+
+            # Use the pre-calculated realistic distribution value
+            "RiskScore": generated_risk_score,
+            
+            #"CrossBorderFactor": np.random.choice(sampling_cfg['CrossBorderFactor']['choices'], p=sampling_cfg['CrossBorderFactor']['probabilities']),
+            "CrossBorderFactor": sampling_cfg.get('CrossBorderFactor', 1.0)
+        }
+
+
+        # --- RECONCILED DYNAMIC SAMPLING (Block 0: Population Mix) ---
+        def dynamic_sample(field_name):
+            """
+            Fetches and samples categorical distributions for Round Tripping.
+            Prioritizes Optuna's Bayesian-shifted vectors over static config priors.
+            """
+            # 1. Resolve Optuna Key (e.g., 'biz_round_tripping_EntityType_probs')
+            prob_key = f"{scenario_type}_{field_name}_probs"
+            
+            # 2. Sourcing Baseline from sampling_cfg
+            field_data = sampling_cfg.get(field_name, {})
+            choices = field_data.get('choices', [])
+            default_probs = field_data.get('probabilities', [])
+            
+            # 3. Bayesian Override: Prioritize the shifted vector from Optuna
+            p_vector = opt_overrides.get(prob_key, default_probs)
+            
+            # 4. Safe Sampling: Matches choices to optimized probabilities
+            return np.random.choice(choices, p=p_vector)
+
+        # --- 2026 RECONCILED ENTITY GENERATION ---
+        entity = {
+            # Categorical Entities (Optimized via Block 0 Probability Shifts)
+            "EntityType":      dynamic_sample("EntityType"),
+            "EntitySize":      dynamic_sample("EntitySize"),
+            "OwnershipType":   dynamic_sample("OwnershipType"),
+            "IndustrySector":  dynamic_sample("IndustrySector"),
+
+            # Complexity Level: Optuna-tunable bounds (Replacing hardcoded +1 logic)
+            "ComplexityLevel": np.random.randint(
+                opt_overrides.get(f"{scenario_type}_ComplexityMin", sampling_cfg['ComplexityLevel']['min']),
+                opt_overrides.get(f"{scenario_type}_ComplexityMax", sampling_cfg['ComplexityLevel']['max']) + 1
+            ),
+
+            # Risk Score: Prioritize Bayesian override, fallback to Beta distribution
+            "RiskScore": opt_overrides.get(
+                f"{scenario_type}_RiskScore_base", 
+                round(np.random.beta(rs_cfg['alpha'], rs_cfg['beta']) * rs_cfg['scale'], 2)
+            ),
+            
+            # Cross Border Factor: Optimized scalar (Replacing static cfg lookup)
+            "CrossBorderFactor": opt_overrides.get(
+                f"{scenario_type}_CrossBorder_f", 
+                sampling_cfg.get('CrossBorderFactor', 1.0)
+            )
+        }
+
+        # --- SAFETY UNPACK (For downstream multiplier lookup) ---
+        entity_type      = entity["EntityType"]
+        entity_size      = entity["EntitySize"]
+        ownership_type   = entity["OwnershipType"]
+        industry_sector  = entity["IndustrySector"]
+        complexity_level = entity["ComplexityLevel"]
+        risk_score       = entity["RiskScore"]
+        cross_border_f   = entity["CrossBorderFactor"]
+
+
+
+        # --- 0. EXTRACT 3D PARAMETERS (2026 Retrofit) ---
+        topo, chan, econ = cfg['network_topology'], cfg['channel_config'], cfg['economic_sensibility']
+        # --- 1. 3D TOTAL RISK MODIFIER ---
+        # Consolidates Topology (Shell Depth), Diversity (Switch Intensity), and Economic (Trade Mod)
+        total_risk_mod = max(1e-6, 
+                         (topo['shell_company_depth'] / 2.0) * \
+                         (chan['rail_switch_intensity'] / 2.0) * \
+                         (1.0 + (1.0 - econ['trade_based_layering_mod']))
+        )
+
+        
+
+
+        # --- 1. ACTIVE MULTIPLIER LOOKUPS ---
+        entity_f   = get_factor(multipliers.get('EntityType'), entity['EntityType'])
+        size_f     = get_factor(multipliers.get('EntitySize'), entity['EntitySize'])
+        owner_f    = get_factor(multipliers.get('OwnershipType'), entity['OwnershipType'])
+        industry_f = get_factor(multipliers.get('IndustrySector'), entity['IndustrySector'])
+        
+        # Complexity and Cross-Border factors act as direct scalars for obfuscation potential
+        complexity_f = 1.0 + (entity['ComplexityLevel'] / 10.0)
+        cross_border_f = 1.5 if entity['CrossBorderFactor'] == "High" else 1.0
+
+
+
+
+
+        # --- RECONCILED MULTIPLIER LOOKUPS (Block 1 Optimization) ---
+        # 1. Demographic Factors: Prioritize Bayesian override, fallback to config dict
+        entity_f   = opt_overrides.get(f"{scenario_type}_EntityType_f", 
+                                       get_factor(multipliers.get('EntityType'), entity['EntityType']))
+                                       
+        size_f     = opt_overrides.get(f"{scenario_type}_EntitySize_f", 
+                                       get_factor(multipliers.get('EntitySize'), entity['EntitySize']))
+                                       
+        owner_f    = opt_overrides.get(f"{scenario_type}_OwnershipType_f", 
+                                       get_factor(multipliers.get('OwnershipType'), entity['OwnershipType']))
+                                       
+        industry_f = opt_overrides.get(f"{scenario_type}_IndustrySector_f", 
+                                       get_factor(multipliers.get('IndustrySector'), entity['IndustrySector']))
+
+        # 2. Obfuscation Factors: Optimizing hardcoded 10.0, 1.5, and 1.0
+        # Complexity Logic: 1.0 + (Level / divisor)
+        comp_div = opt_overrides.get(f"{scenario_type}_Complexity_divisor", 10.0)
+        complexity_f = 1.0 + (entity['ComplexityLevel'] / comp_div)
+
+        # Cross-Border Logic: Replacing hardcoded 1.5 and 1.0
+        cb_high_f = opt_overrides.get(f"{scenario_type}_CrossBorder_high_f", 1.5)
+        cb_neut_f = opt_overrides.get(f"{scenario_type}_CrossBorder_neutral_f", 1.0)
+        
+        # Pulling the optimized cross-border multiplier based on actor state
+        cross_border_f = cb_high_f if entity['CrossBorderFactor'] == "High" else cb_neut_f
+
+
+
+        # Create the Static Demographic Foundation (D_Risk)
+        # We include RiskScore (normalized) to ground the profile in its baseline risk
+        D_Risk = (entity_f * size_f * owner_f * industry_f * complexity_f * cross_border_f * (entity['RiskScore'] / 5.0))
+
+        # --- 2. THE 2026 TOTAL BEHAVIORAL RISK BRIDGE ---
+        # 1e-6 Safeguard prevents mathematical failure during BO trials
+        Total_Behavioral_Risk = max(1e-6, (
+            D_Risk * 
+            (topo['shell_company_depth'] / 2.0) * 
+            (chan['rail_switch_intensity'] / 2.0) * 
+            (1.0 + (1.0 - econ['trade_based_layering_mod']))
+        ))
+
+
+
+
+
+        # --- RECONCILED D_RISK (Block 1 Extension) ---
+        # Logic: (Multipliers * (RiskScore / divisor))
+        r_div = opt_overrides.get(f"{scenario_type}_RiskScore_divisor", 5.0)
+        D_Risk = (entity_f * size_f * owner_f * industry_f * complexity_f * cross_border_f * (entity['RiskScore'] / r_div))
+
+        # --- RECONCILED 2026 TOTAL BEHAVIORAL RISK BRIDGE ---
+        
+        # 1. Shell Depth & Rail Switch Optimization
+        # Replacing hardcoded 2.0 divisors with optimized scalars
+
+        # --- RECONCILED 2026 RISK BRIDGE ADJUSTMENTS ---
+
+        # 1. Shell Depth Optimization
+        # Use optimized base, fallback to topo config
+        shell_base = opt_overrides.get(f"{scenario_type}_ShellDepth_base", topo['shell_company_depth'])
+        shell_div = opt_overrides.get(f"{scenario_type}_ShellDepth_divisor", 2.0)
+        shell_component = shell_base / shell_div
+
+        # 2. Rail Switch Optimization
+        # Use optimized base, fallback to chan config
+        rail_base = opt_overrides.get(f"{scenario_type}_RailSwitch_base", chan['rail_switch_intensity'])
+        rail_div  = opt_overrides.get(f"{scenario_type}_RailSwitch_divisor", 2.0)
+        rail_component  = rail_base / rail_div
+
+        # 2. Trade-Based Layering Logic
+        # Replacing hardcoded 1.0s with optimized baselines and offsets
+
+        # 3. Trade-Based Layering Logic
+        # Use optimized base, fallback to econ config
+        trade_mod_base = opt_overrides.get(f"{scenario_type}_TradeMod_base", econ['trade_based_layering_mod'])
+        t_base   = opt_overrides.get(f"{scenario_type}_TradeMod_baseline", 1.0)
+        t_offset = opt_overrides.get(f"{scenario_type}_TradeMod_offset", 1.0)
+        trade_component = t_base + (t_offset - trade_mod_base)
+
+        # 3. Global Economic Scalar
+        # Provides Optuna with a final "Sensitivity Dial" for the whole bridge
+        econ_f = opt_overrides.get(f"{scenario_type}_EconScale_f", 1.0)
+
+        # Final Reconciled Bridge with 1e-6 Safeguard
+        Total_Behavioral_Risk = max(1e-6, (
+            D_Risk * 
+            shell_component * 
+            rail_component * 
+            trade_component * 
+            econ_f
+        ))
+
+
+        
+        # Intensity influenced by 3D structural risk
+        base_propensity = (entity['ComplexityLevel'] * 0.4) + (entity['RiskScore'] * 0.2)
+        aggression_multiplier = np.random.lognormal(mean=0.1, sigma=0.2)
+        intensity = round(base_propensity * aggression_multiplier * entity['CrossBorderFactor'] * total_risk_mod, 2)
+        intensity = max(1.0, min(5.0, intensity))
+        
+
+        # 1. Establish the 'Aggression Mode'
+        # Log-normal distribution captures the 'heavy-tailed' nature of financial crime intensity
+        aggression_multiplier = np.random.lognormal(mean=0.1, sigma=0.2)
+
+        # --- RECONCILED GENERATIVE INTENSITY (Block 3) ---
+
+        # 1. Establish the 'Aggression Mode' (Optimizing lognormal parameters)
+        # Replacing hardcoded mean=0.1 and sigma=0.2
+        a_mu    = opt_overrides.get(f"{scenario_type}_agg_mu", 0.1)
+        a_sigma = opt_overrides.get(f"{scenario_type}_agg_sigma", 0.2)
+        aggression_multiplier = np.random.lognormal(mean=a_mu, sigma=a_sigma)
+
+
+        # 2. 2026 Unified Intensity Calculation
+        # Total_Behavioral_Risk already contains Complexity, RiskScore, and CrossBorderFactor.
+        # We multiply by the random aggression to create behavioral variety.
+        intensity = aggression_multiplier * Total_Behavioral_Risk
+
+        # 2. 2026 Unified Intensity Calculation
+        # RT_Intensity_Scalar provides Optuna with a final weight for the Risk Bridge
+        rt_scalar = opt_overrides.get(f"{scenario_type}_rt_intensity_scalar", 1.0)
+        intensity = aggression_multiplier * Total_Behavioral_Risk * rt_scalar
+
+
+        # 3. DYNAMIC SAFEGUARDS (Removing the Hard Cap)
+        # Instead of max(1.0, min(5.0...)), we use BO-tuned boundaries
+        int_floor = trial.suggest_float("rt_int_floor", 0.1, 1.5)
+        int_ceiling = trial.suggest_float("rt_int_ceiling", 5.0, 15.0)
+
+        # 3. DYNAMIC SAFEGUARDS (Superseding trial.suggest_float)
+        int_floor   = opt_overrides.get(f"{scenario_type}_rt_int_floor", 0.1)
+        int_ceiling = opt_overrides.get(f"{scenario_type}_rt_int_ceiling", 5.0)
+
+
+        # Apply Safeguard
+        intensity = max(int_floor, min(int_ceiling, round(intensity, 2)))
+
+
+        
+        cycle_multiplier = multipliers['CycleScale'].get(entity['EntitySize'], 1.0)
+        n_cycles = max(2, int(cfg['n_cycles_base'] * intensity * cycle_multiplier))
+
+        # --- 2. REFINED LABELING LOGIC (3D Aware) ---
+        # 2026 Detection: Label is triggered if intensity/depth exceeds thresholds or total_risk_mod is extreme
+        if (intensity > (2.2 / total_risk_mod)) or (entity['ComplexityLevel'] >= 4 and intensity > 1.5) or (topo['mule_cluster_density'] > 0.8):
+            current_label = 1
+        else:
+            current_label = 0
+
+
+        
+        # --- 1. DYNAMIC ANOMALY SENSITIVITY ---
+        # Instead of 2.2 / Total_Behavioral_Risk (which fluctuates wildly), 
+        # we use the UBR to lower the barrier for suspicious labeling on high-risk profiles.
+        # Higher UBR = Lower threshold for intensity to trigger a 'Label 1'
+        detection_threshold = max(1.2, 3.0 - (Total_Behavioral_Risk * 0.2))
+
+
+        # --- RECONCILED DYNAMIC ANOMALY SENSITIVITY (Block 4) ---
+
+        # 1. Detection Threshold Optimization
+        d_floor = opt_overrides.get(f"{scenario_type}_detect_thresh_floor", 1.2)
+        d_base  = opt_overrides.get(f"{scenario_type}_detect_thresh_base", 3.0)
+        d_scale = opt_overrides.get(f"{scenario_type}_detect_risk_scale", 0.2)
+        
+        detection_threshold = max(d_floor, d_base - (Total_Behavioral_Risk * d_scale))
+
+        # --- 2. MULTI-PRONGED DETECTION TRIGGERS ---
+        
+        # Trigger A: Excessive Circular Velocity (Intensity vs Dynamic Threshold)
+        is_velocity_spike = (intensity > detection_threshold)
+
+        # Trigger B: Complexity-Intensity Collision
+        # In 2026, high complexity + even moderate intensity = High Risk
+        is_complexity_anomaly = (entity['ComplexityLevel'] >= 4 and intensity > 1.4)
+
+        # Trigger B: Complexity-Intensity Collision (Optimizing hardcoded 4 & 1.4)
+        c_level = int(opt_overrides.get(f"{scenario_type}_complex_trigger_level", 4))
+        c_int_t = opt_overrides.get(f"{scenario_type}_complex_int_thresh", 1.4)
+        c_floor = opt_overrides.get(f"{scenario_type}_complex_floor", 0)
+        
+        is_complexity_anomaly = (entity.get('ComplexityLevel', c_floor) >= c_level and intensity > c_int_t)
+
+
+        # Trigger C: Structural Obfuscation (Network & Channel)
+        # Circularity and Rail Hopping are the 'DNA' of Round-Tripping
+        is_obfuscation_trigger = (topo.get('mule_cluster_density', 0) > 0.75) or \
+                                 (chan.get('rail_switch_intensity', 0) > 3.0)
+
+
+        # Trigger C: Structural Obfuscation (Network & Channel)
+        # Optimizing hardcoded 0.75 and 3.0, and 0 fallbacks
+        m_dens_t = opt_overrides.get(f"{scenario_type}_mule_density_thresh", 0.75)
+        r_switch_t = opt_overrides.get(f"{scenario_type}_rail_switch_thresh", 3.0)
+        obfus_floor = opt_overrides.get(f"{scenario_type}_obfus_floor", 0)
+
+        # Note: We prioritize the optimized bases from Block 2 if they exist
+        mule_d_val = opt_overrides.get(f"{scenario_type}_MuleDensity_base", topo.get('mule_cluster_density', obfus_floor))
+        rail_s_val = opt_overrides.get(f"{scenario_type}_RailSwitch_base", chan.get('rail_switch_intensity', obfus_floor))
+
+        is_obfuscation_trigger = (mule_d_val > m_dens_t) or (rail_s_val > r_switch_t)
+
+
+        # --- 3. FINAL LABEL ASSIGNMENT ---
+        # Add a sensitivity override for the Bayesian "catch-all"
+        l_sens = opt_overrides.get(f"{scenario_type}_label_sensitivity", 0)
+
+        #if is_velocity_spike or is_complexity_anomaly or is_obfuscation_trigger:
+
+        if is_velocity_spike or is_complexity_anomaly or is_obfuscation_trigger or (Total_Behavioral_Risk > l_sens > 0):
+            current_label = 1
+        else:
+            current_label = 0
+
+
+
+        
+        t_prev = anchor
+
+        # 1. Optimized EVT Payload Fetching
+        # Replacing direct trial calls with overrides
+
+        # Now our call inside def generate_events_from_params will run perfectly:
+        evt_payload = extreme_value_theory(
+            tx_window, 
+            scenario_type="biz_round_tripping",
+            #threshold_pct=trial.suggest_float("brt_threshold_pct", 90, 99),
+            #confidence_level=trial.suggest_float("brt_confidence_level", 0.99, 0.9999),
+            threshold_pct=opt_overrides.get(f"{scenario_type}_brt_threshold_pct", 95.0),
+            confidence_level=opt_overrides.get(f"{scenario_type}_brt_confidence_level", 0.999),            
+            #sample_n=trial.suggest_int("brt_sample_n", 3, 15)
+            sample_n=int(opt_overrides.get(f"{scenario_type}_brt_sample_n", 5))
+        )        
+
+        # --- PRE-LOOP: Define Behavioral Strategy & Access EVT ---
+        biz_data = evt_payload["biz_round_tripping"]["high_tail_outliers"]
+        evt_params = biz_data["params"]
+        
+        # Bayesian "Precision Round-Trip" Strategy
+        # High retention simulates professional trade-based laundering
+        biz_m_shift = trial.suggest_float("brt_retention_scale", 0.97, 1.05) 
+        biz_s_scale = trial.suggest_float("brt_precision_scale", 0.15, 0.45)
+
+        # 2. Precision Round-Trip Strategy (Optimizing 0.97-1.05 and 0.15-0.45)
+        biz_m_shift = opt_overrides.get(f"{scenario_type}_brt_retention_scale", 1.0) 
+        biz_s_scale = opt_overrides.get(f"{scenario_type}_brt_precision_scale", 0.3)
+
+        lower_bound = cfg['amt_min']
+        upper_bound = cfg['amt_max'] * intensity * 2 # Allow for inflated trade values
+
+
+        # Optimized Boundaries
+        amt_min_p = opt_overrides.get(f"{scenario_type}_brt_amt_min_base", cfg['amt_min'])
+        amt_max_p = opt_overrides.get(f"{scenario_type}_brt_amt_max_base", cfg['amt_max'])
+        ub_mult   = opt_overrides.get(f"{scenario_type}_brt_upper_bound_mult", 2.0)
+        
+        lower_bound = amt_min_p
+        upper_bound = amt_max_p * intensity * ub_mult
+
+
+        struct_m_shift = trial.suggest_float("brt_struct_m_shift", 0.90, 0.98) if current_label else 1.0
+        struct_s_scale = trial.suggest_float("brt_struct_precision_scale", 0.10, 0.30) if current_label else 1.0
+        
+        # 2026 DIFFERENTIATED BOUNDS:
+        # Lower bound remains ledger-standard for all tx
+        lower_bound_struct = cfg['amt_min']
+        
+        # Structuring-specific Upper Bound: Hard-capped to mimic threshold avoidance
+        # This is distinct from 'upper_bound' used in the EVT Hop phase
+        upper_bound_struct = cfg['structuring_amt_max'] 
+
+
+        # 3. Structuring Logic (Professional/Criminal Mode)
+        # Using 1.0 fallbacks if not labeled/active
+        struct_m_shift = opt_overrides.get(f"{scenario_type}_brt_struct_m_shift", 0.95) if current_label else 1.0
+        struct_s_scale = opt_overrides.get(f"{scenario_type}_brt_struct_precision_scale", 0.2) if current_label else 1.0
+        
+        lower_bound_struct = amt_min_p
+        upper_bound_struct = opt_overrides.get(f"{scenario_type}_brt_struct_max_base", cfg['structuring_amt_max'])
+
+
+
+        # 2. Apply Bayesian Precision (Translation & Contraction)
+        # This ensures the 'Intent' per cycle is precise and professional
+        base_m_shift = trial.suggest_float("brt_base_m_shift", 1.0, 1.15) if current_label else 1.0
+        base_s_scale = trial.suggest_float("brt_base_precision_scale", 0.2, 0.5) if current_label else 1.0
+
+
+        # 4. Base Intent Translation (Block 5 overrides)
+        base_m_shift = opt_overrides.get(f"{scenario_type}_brt_base_m_shift", 1.1) if current_label else 1.0
+        base_s_scale = opt_overrides.get(f"{scenario_type}_brt_base_precision_scale", 0.35) if current_label else 1.0
+
+        # Lower bound remains ledger-standard for all tx
+        lower_bound_base = cfg['amt_min']
+        
+        # Structuring-specific Upper Bound: Hard-capped to mimic threshold avoidance
+        # This is distinct from 'upper_bound' used in the EVT Hop phase
+        upper_bound_base = cfg['amt_max']
+
+
+        lower_bound_base = amt_min_p
+        upper_bound_base = amt_max_p
+
+        # --- RECONCILED CYCLE & BASELINE LOGIC (Block 6) ---
+
+        for cycle in range(n_cycles):
+            # Economic Sensibility: Staged Escalation per cycle
+            escalation = (econ['staged_escalation_factor'] ** cycle) if current_label else 1.0
+
+            # 1. Escalation Optimization
+            # Logic: (econ['staged_escalation_factor'] ** cycle)
+            esc_base = opt_overrides.get(f"{scenario_type}_staged_esc_base", econ['staged_escalation_factor'])
+            escalation = (esc_base ** cycle) if current_label else 1.0
+
+            
+            #amt_base = round(np.random.uniform(cfg['amt_min'], cfg['amt_max']) * intensity * multipliers['BaseAmount'].get(entity['EntitySize'], 1.0) * escalation, 2)
+            raw_base = np.random.uniform(cfg['amt_min'], cfg['amt_max']) * intensity * multipliers['BaseAmount'].get(entity['EntitySize'], 1.0) * escalation
+
+            
+            # 1. Address Point 2: Optimize the "Perfect" Config Bounds
+            # Replacing cfg['amt_min/max'] with Optuna-tuned search space
+            r_min = opt_overrides.get(f"{scenario_type}_raw_amt_min", cfg['amt_min'])
+            r_max = opt_overrides.get(f"{scenario_type}_raw_amt_max", cfg['amt_max'])            
+
+            # 2. Address Point 1: Generalized Entity Factor
+            # Instead of a singular 1.0, we use get_factor to pull the prior from config,
+            # and let base_amt_size_f act as a global scalar for that prior.
+            size_prior = get_factor(multipliers.get('BaseAmount'), entity['EntitySize'])
+            size_f = opt_overrides.get(f"{scenario_type}_base_amt_size_f", 1.0)
+            
+            raw_base = np.random.uniform(r_min, r_max) * intensity * (size_prior * size_f) * escalation
+
+            
+            tuned_base_mu = raw_base * base_m_shift
+            tuned_base_sigma = (raw_base * 0.05) * base_s_scale
+
+            s_ratio = opt_overrides.get(f"{scenario_type}_base_sigma_ratio", 0.05)
+            tuned_base_sigma = (raw_base * s_ratio) * base_s_scale
+
+            
+            # Truncate to ensure it stays within bank limits
+            a_base = (lower_bound_base - tuned_base_mu) / max(0.01, tuned_base_sigma)
+            b_base = (upper_bound_base - tuned_base_mu) / max(0.01, tuned_base_sigma)
+
+            s_floor = opt_overrides.get(f"{scenario_type}_sigma_floor_rt", 0.01)
+            safe_sigma = max(s_floor, tuned_base_sigma)
+            a_base = (lower_bound_base - tuned_base_mu) / safe_sigma
+            b_base = (upper_bound_base - tuned_base_mu) / safe_sigma
+
+
+            # 3. Address Point 3: Why 'safe_sigma' is superior to 'tuned_base_sigma'
+            # Reason: Truncnorm requires a strictly positive scale. If tuned_base_sigma
+            # ever hits 0.0 (due to Optuna testing a 0.0 base_s_scale), the code crashes.            
+            
+            #amt_base = round(truncnorm.rvs(a_base, b_base, loc=tuned_base_mu, scale=tuned_base_sigma), 2)
+            
+            amt_base = round(truncnorm.rvs(a_base, b_base, loc=tuned_base_mu, scale=safe_sigma), 2)
+
+            
+            # --- 2. STRUCTURING PHASE (Placement) ---
+            #structuring_tx_count = max(5, int(cfg['structuring_tx_base'] * intensity))
+            #t_struct = t_prev
+            
+            # Re-including ComplexityLevel 'cl' for tuned structuring volume
+            cl = entity['ComplexityLevel']
+            structuring_tx_count = max(5, int(cfg['structuring_tx_base'] * intensity * (1 + 0.1 * cl)))
+
+
+            
+            # 4. Structuring Volume Logic (Optimizing 5, 0.1, and cfg lookup)
+            n_base_f  = opt_overrides.get(f"{scenario_type}_struct_n_base_f", cfg.get('structuring_tx_base', 1.0))
+            cl_weight = opt_overrides.get(f"{scenario_type}_struct_n_cl_weight", 0.1)
+            n_floor   = int(opt_overrides.get(f"{scenario_type}_struct_n_floor", 5))
+            
+            cl = entity['ComplexityLevel']
+            structuring_tx_count = max(n_floor, int(n_base_f * intensity * (1 + cl_weight * cl))
+
+            
+            t_struct = t_prev
+            
+            for _ in range(structuring_tx_count):
+                # Channel Diversity: Latency bypass for instant structuring rails
+                v_bypass = chan['latency_bypass_multiplier'] if np.random.random() < 0.3 else 1.0
+
+                # 1. Spatiotemporal Velocity
+                # Optimizing hardcoded 0.3, 0.5, and gap multipliers
+                h_prob   = opt_overrides.get(f"{scenario_type}_brt_hop_prob", 0.3)
+                v_bypass_val = opt_overrides.get(f"{scenario_type}_brt_v_bypass_base", chan.get('latency_bypass_multiplier', 2.0))
+                v_neutral_val = opt_overrides.get(f"{scenario_type}_brt_v_bypass_neutral", 1.0)
+                v_bypass = v_bypass_val if np.random.random() < h_prob else v_neutral_val
+
+                
+                
+                # 2026 REFINEMENT: Structure gap compressed by intensity/Total_Behavioral_Risk   #total_risk_mod
+                #holistic_struct_velocity = (1/v_bypass) * entity['CrossBorderFactor'] * intensity * max(0.5, total_risk_mod)
+                holistic_struct_velocity = (1/v_bypass) * entity['CrossBorderFactor'] * intensity * max(0.5, Total_Behavioral_Risk)
+
+                gap_hours = float(np.random.lognormal( cfg['structuring_gap_mean'], cfg['structuring_gap_sigma'] )) / holistic_struct_velocity
+
+                v_min    = opt_overrides.get(f"{scenario_type}_brt_v_min", 0.5)
+                # cross_border_f is optimized from Block 1
+                v_struct = (1/v_bypass) * cross_border_f * intensity * max(v_min, Total_Behavioral_Risk)
+
+                # 2. TEMPORAL GAP OPTIMIZATION
+                # Replacing cfg lookups with optimized bases and scalars
+                g_mu_base = opt_overrides.get(f"{scenario_type}_brt_gap_mu_base", cfg['structuring_gap_mean'])
+                g_si_base = opt_overrides.get(f"{scenario_type}_brt_gap_sigma_base", cfg['structuring_gap_sigma'])
+                g_mu_f   = opt_overrides.get(f"{scenario_type}_brt_gap_mu_f", 1.0)
+                g_si_f   = opt_overrides.get(f"{scenario_type}_brt_gap_sigma_f", 1.0)
+                
+                gap_hours = float(np.random.lognormal(
+                    g_mu_base * g_mu_f, 
+                    g_si_base * g_si_f
+                )) / v_struct
+
+
+                
+                # gap_hours = float(np.random.lognormal(cfg['structuring_gap_mean'], cfg['structuring_gap_sigma'])) * v_bypass
+                #t_struct += timedelta(hours=gap_hours * entity['CrossBorderFactor'])
+
+                t_struct += timedelta(hours=gap_hours)
+                
+                #amt_struct = round(np.clip(np.random.normal(cfg['structuring_amt_mu'], cfg['structuring_amt_sigma']), cfg['amt_min'], cfg['structuring_amt_max']), 2)
+
+                base_flow_struct = np.clip(np.random.normal(cfg['structuring_amt_mu'], cfg['structuring_amt_sigma']), lower_bound_struct, upper_bound_struct)
+
+                # 3. BASE FLOW OPTIMIZATION
+                # Replacing cfg lookups for amt_mu and amt_sigma
+                a_mu_base = opt_overrides.get(f"{scenario_type}_brt_amt_mu_base", cfg['structuring_amt_mu'])
+                a_si_base = opt_overrides.get(f"{scenario_type}_brt_amt_sigma_base", cfg['structuring_amt_sigma'])
+                
+                # 2. Base Amount Generation
+                base_flow_struct = np.clip(
+                    np.random.normal(a_mu_base, a_si_base), 
+                    lower_bound_struct, 
+                    upper_bound_struct
+                )                
+
+                
+                # 3. EVT Tail vs. Professional Precision
+                # Optimizing thresholds (2.8, 4) and Tail Dynamics (0.5, 0.1, 0.7, 20.0)
+                s_int_t = opt_overrides.get(f"{scenario_type}_brt_int_thresh", 2.8)
+                s_cl_t  = int(opt_overrides.get(f"{scenario_type}_brt_cl_thresh", 4))
+
+                
+                # --- 2026 ADVANTAGE: EVT TAIL-PROBING FOR STRUCTURING ---
+                # Check for High Intensity or Advanced Complexity to trigger EVT
+                #if evt_params["sigma_scale"] > 0 and (intensity > 2.8 or entity['ComplexityLevel'] >= 4):
+
+                if evt_params["sigma_scale"] > 0 and (intensity > s_int_t or complexity_level >= s_cl_t):
+                    
+                    # Use a specialized structuring sigma (scaled for threshold precision)
+                    #struct_evt_sigma = evt_params["sigma_scale"] * 0.5 * (1 + (0.1 * total_risk_mod))
+                    struct_evt_sigma = evt_params["sigma_scale"] * 0.5 * (1 + (0.1 * Total_Behavioral_Risk))
+
+                    t_sig_f  = opt_overrides.get(f"{scenario_type}_brt_tail_sigma_f", 0.5)
+                    t_risk_w = opt_overrides.get(f"{scenario_type}_brt_tail_risk_w", 0.1)
+                    struct_evt_sigma = evt_params["sigma_scale"] * t_sig_f * (1 + (t_risk_w * Total_Behavioral_Risk))                    
+                    
+                    
+                    # Tail depth increases with cycles as the entity becomes bolder
+                    tail_depth = min(0.999, 0.7 + (cycle / 20.0))
+
+                    t_depth_b = opt_overrides.get(f"{scenario_type}_brt_tail_depth_b", 0.7)
+                    t_depth_d = opt_overrides.get(f"{scenario_type}_brt_tail_depth_d", 20.0)
+                    tail_depth = min(0.999, t_depth_b + (cycle / t_depth_d))
+
+                    
+                    u_sample = np.random.uniform(0.5, tail_depth)
+                    
+                    # Exceedance pushes the amount toward the 'upper_bound_struct' (the $10k limit)
+                    exceedance = genpareto.ppf(u_sample, evt_params["xi_shape"], loc=0, scale=struct_evt_sigma)
+                    #amt_struct = round(min(upper_bound_struct, base_flow_struct + exceedance), 2)
+                    
+                    # 2026 PROBING LOGIC: Instead of a hard min(), use a "soft-cap" 
+                    # that keeps it 0.5% - 2% below the threshold
+                    probing_limit = upper_bound_struct * np.random.uniform(0.98, 0.999)
+
+                    # --- RESOLVED PROBING LOGIC ---
+                    p_min = opt_overrides.get(f"{scenario_type}_brt_probing_min", 0.98)
+                    p_max = opt_overrides.get(f"{scenario_type}_brt_probing_max", 0.999)
+                    probing_limit = upper_bound_struct * np.random.uniform(p_min, p_max)
+                    
+                    #amt_struct = round(min(probing_limit, base_flow_struct + exceedance), 2)
+                    #amt_struct = round(  base_flow_struct + exceedance, 2)
+
+                    # Force amount to respect the probing limit (simulates threshold avoidance)
+                    amt_struct = round(min(probing_limit, base_flow_struct + exceedance), 2)
+                    
+                else:
+                    # Pre-calculate tuned stats to avoid redundant math in the loop
+                    
+                    tuned_struct_mu = base_flow_struct * struct_m_shift
+                    tuned_struct_sigma = base_flow_struct * struct_s_scale
+    
+                    # --- 2026 REFINEMENT: TRANSLATED & CONTRACTED STRUCTURING ---
+                    # Use structuring-specific bounds to calculate truncation clips
+                    a_struct = (lower_bound_struct - tuned_struct_mu) / max(0.01, tuned_struct_sigma)
+                    b_struct = (upper_bound_struct - tuned_struct_mu) / max(0.01, tuned_struct_sigma)
+
+                    safe_s_sigma = max(0.01, tuned_struct_sigma)
+                    a_struct = (lower_bound_struct - tuned_struct_mu) / safe_s_sigma
+                    b_struct = (upper_bound_struct - tuned_struct_mu) / safe_s_sigma
+                    
+                    # Generate precise, clustered amount (Smurfing Signature)
+                    #amt_struct = round(truncnorm.rvs(a_struct, b_struct, loc=tuned_struct_mu, scale=tuned_struct_sigma), 2)
+
+                    amt_struct = round(truncnorm.rvs(a_struct, b_struct, loc=tuned_struct_mu, scale=safe_s_sigma), 2)
+
+                tx_type = np.random.choice(["CREDIT", "DEBIT"], p=multipliers['Ownership_Tx_Probs'].get(entity['OwnershipType'], [0.5, 0.5]))
+
+                
+                # 5. DIRECTIONAL LOGIC (Broadened for 2026)
+                # We use the Zero-Assumption approach: Pull prior, scale by Optuna
+                d_prior = get_factor(multipliers.get('Ownership_Tx_Probs'), entity['OwnershipType'])
+                d_prob_f = opt_overrides.get(f"{scenario_type}_brt_debit_prior_f", 1.0)
+                # Final probability balanced between prior and a tunable global debit probability
+                d_final = opt_overrides.get(f"{scenario_type}_brt_debit_prob", d_prior * d_prob_f)
+                d_final = max(0.01, min(0.99, d_final)) # Safety clamp
+                
+                tx_type = np.random.choice(["CREDIT", "DEBIT"], p=[1.0 - d_final, d_final])
+                
+                rows.append(_assemble_tx(acct, party_key, ref_date, t_struct, amt_struct, tx_type, config, label=current_label))
+
+            # --- 3. HOPS PHASE (The Structural Loop) ---
+            # Topology: depth floored by circular_path_depth
+            #n_hops = max(topo['circular_path_depth'], int(np.random.uniform(1, cfg['max_hops']) * intensity))
+            #amt_prev = amt_base
+
+            # Re-adding complexity_multiplier to ensure sophisticated layering
+            comp_weight = multipliers['Complexity_Weight']
+            complexity_multiplier = 1 + (entity['ComplexityLevel'] * comp_weight)
+
+
+            # --- RECONCILED HOP FOUNDATION (Block 9) ---
+            
+            # 1. Complexity Weight Optimization
+            # Replacing multipliers['Complexity_Weight'] with a tunable scalar
+            c_weight_prior = multipliers.get('Complexity_Weight', 0.1) # Expert prior
+            c_weight_f     = opt_overrides.get(f"{scenario_type}_brt_comp_weight_f", 1.0)
+            complexity_multiplier = 1 + (entity['ComplexityLevel'] * (c_weight_prior * c_weight_f))
+
+
+
+            
+            # Integrated logic: n_hops now respects both topology depth and entity complexity
+            n_hops = max(topo['circular_path_depth'], int(np.random.uniform(1, cfg['max_hops']) * intensity * complexity_multiplier))
+
+            # 2. Hop Count Optimization (The 'Needle' in the Network)
+            # Replacing np.random.uniform(1, cfg['max_hops']) with optimized bounds
+            h_min_base = opt_overrides.get(f"{scenario_type}_brt_hop_min_base", 1.0)
+            h_max_base = opt_overrides.get(f"{scenario_type}_brt_max_hops_base", cfg.get('max_hops', 5.0))
+            h_scalar   = opt_overrides.get(f"{scenario_type}_brt_hop_scalar", 1.0)
+            
+            # Logic: We take the max of the topology depth or the optimized behavioral depth
+            # This ensures the 'Needle' is deep enough to be suspicious but grounded in topo
+            behavioral_hops = int(np.random.uniform(h_min_base, h_max_base) * intensity * complexity_multiplier * h_scalar)
+
+            # 3. Optimized Infrastructure Anchor
+            # Replacing topo.get('circular_path_depth', 2) with a tunable base
+            # This allows Optuna to challenge the topology's "reported" depth
+            topo_depth_p = opt_overrides.get(f"{scenario_type}_brt_topo_depth_base", topo.get('circular_path_depth', 2))
+
+            # Final Hop Count: Intersection of Intent and Optimized Infrastructure
+            n_hops = max(int(topo_depth_p), behavioral_hops)
+
+            
+            amt_prev = amt_base
+            
+            for hop in range(n_hops):
+                # CHANNEL DIVERSITY: Rail hopping breaks lineage
+                is_rail_hop = np.random.random() < chan['hop_diversification_prob']
+
+                # Replacing static chan lookup with a tunable probability scalar
+                # We pull the probability directly into an Optuna-controlled variable
+                h_div_optimized = opt_overrides.get(
+                    f"{scenario_type}_brt_hop_div_prob", 
+                    chan.get('hop_diversification_prob', 0.2)
+                )
+                
+                is_rail_hop = np.random.random() < h_div_optimized
+                
+                tx_type = np.random.choice(chan['rails']) if is_rail_hop else "WIRE"
+                
+                # Economic Sensibility: Retention (Mule Fee)
+                #amt_hop = round(amt_prev * (1 - econ['balance_retention_ratio']) * np.random.uniform(cfg['hop_multiplier_low'], cfg['hop_multiplier_high']), 2)
+
+
+                # Baseline "flow" calculation (Decay/Retention)
+                base_flow = amt_prev * (1 - econ['balance_retention_ratio']) * np.random.uniform(cfg['hop_multiplier_low'], cfg['hop_multiplier_high'])
+
+                # 2. Base Flow & Retention Optimization
+                # Replacing static retention and multiplier bounds with tunable overrides
+                b_retention = opt_overrides.get(f"{scenario_type}_brt_retention_ratio", econ.get('balance_retention_ratio', 0.05))
+                h_mult_low  = opt_overrides.get(f"{scenario_type}_brt_hop_mult_low", cfg.get('hop_multiplier_low', 0.95))
+                h_mult_high = opt_overrides.get(f"{scenario_type}_brt_hop_mult_high", cfg.get('hop_multiplier_high', 1.05))
+                
+                base_flow = amt_prev * (1 - b_retention) * np.random.uniform(h_mult_low, h_mult_high)
+
+                # 3. EVT Tail Strategy for Hops
+                s_int_t = opt_overrides.get(f"{scenario_type}_brt_hop_int_thresh", 2.8)
+                s_cl_t  = int(opt_overrides.get(f"{scenario_type}_brt_hop_cl_thresh", 4))
+                
+                # --- 2026 HYBRID AMOUNT LOGIC ---
+                # IF: EVT for High Intensity Trade Inflation (TBML Signature)
+                #if evt_params["sigma_scale"] > 0 and (intensity > 2.8 or entity['ComplexityLevel'] >= 4):
+                if evt_params["sigma_scale"] > 0 and (intensity > s_int_t or entity['ComplexityLevel'] >= s_cl_t):                    
+                    # Risk-driven tail expansion
+                    #dynamic_sigma = evt_params["sigma_scale"] * (1 + (0.15 * total_risk_mod))
+                    dynamic_sigma = evt_params["sigma_scale"] * (1 + (0.15 * Total_Behavioral_Risk))
+
+                    # Replacing 0.15 risk weight with a tunable parameter
+                    h_tail_risk_w = opt_overrides.get(f"{scenario_type}_brt_hop_tail_risk_w", 0.15)
+                    dynamic_sigma = evt_params["sigma_scale"] * (1 + (h_tail_risk_w * Total_Behavioral_Risk))
+                    
+                    # Tail depth increases with cycles (staged inflation)
+                    tail_depth = min(0.999, 0.4 + (cycle / 10.0))
+
+                    # Replacing 0.4 base and 10.0 decay with tunable anchors
+                    h_tail_depth_b = opt_overrides.get(f"{scenario_type}_brt_hop_tail_depth_b", 0.4)
+                    h_tail_depth_d = opt_overrides.get(f"{scenario_type}_brt_hop_tail_depth_d", 10.0)
+                    tail_depth = min(0.999, h_tail_depth_b + (cycle / h_tail_depth_d))
+                    
+                    u_sample = np.random.uniform(0.6, tail_depth)
+
+                    # Replacing 0.6 uniform lower bound with a tunable probe
+                    h_tail_u_min = opt_overrides.get(f"{scenario_type}_brt_hop_tail_u_min", 0.6)
+                    u_sample = np.random.uniform(h_tail_u_min, tail_depth)
+
+                    
+                    exceedance = genpareto.ppf(u_sample, evt_params["xi_shape"], loc=0, scale=dynamic_sigma)
+                    #amt_hop = round(min(upper_bound, base_flow + exceedance), 2)
+                    amt_hop = round(base_flow + exceedance, 2)
+                
+                # ELSE: Bayesian-Tuned Round Trip (Circular Flow Signature)
+                else:
+
+                    # 4. Standard Truncated Normal Flow
+                    # Replacing 0.04 volatility with a tunable scalar
+                    h_volatility = opt_overrides.get(f"{scenario_type}_brt_hop_volatility", 0.04)
+                    
+                    # Translate mean up to simulate "return to sender" consistency
+                    tuned_mu = base_flow * biz_m_shift                    
+                    # Contract sigma to simulate mechanical trade invoices
+                    tuned_sigma = (base_flow * 0.04) * biz_s_scale
+
+                    tuned_sigma = (base_flow * h_volatility) * biz_s_scale 
+                    
+                    a_biz = (lower_bound - tuned_mu) / max(0.01, tuned_sigma)
+                    b_biz = (upper_bound - tuned_mu) / max(0.01, tuned_sigma)
+
+                    safe_h_sigma = max(0.01, tuned_sigma)
+                    a_biz = (lower_bound - tuned_mu) / safe_h_sigma
+                    b_biz = (upper_bound - tuned_mu) / safe_h_sigma
+
+                    
+                    #amt_hop = round(truncnorm.rvs(a_biz, b_biz, loc=tuned_mu, scale=tuned_sigma), 2)
+
+                    amt_hop = round(truncnorm.rvs(a_biz, b_biz, loc=tuned_mu, scale=safe_h_sigma), 2)
+
+                
+                # --- 2026 REFINEMENT: HOP GAP COMPRESSION ---
+                # The cycle gap must reflect the holistic risk profile (Total_Behavioral_Risk & Intensity)  #Total_Risk_Mod & Intensity)
+                #holistic_hop_velocity = entity['CrossBorderFactor'] * (1/topo['mule_cluster_density']) * intensity * max(0.5, total_risk_mod)
+                holistic_hop_velocity = entity['CrossBorderFactor'] * (1/topo['mule_cluster_density']) * intensity * max(0.5, Total_Behavioral_Risk)
+
+
+                # 5. Temporal Velocity Optimization
+                # Replacing 0.5 risk floor with a tunable behavioral floor
+                # 4. Optimized Holistic Velocity (Direct Variable Substitution)
+                # We pull the values into Optuna-controlled variables directly
+                v_cb_factor = opt_overrides.get(f"{scenario_type}_brt_cb_factor", entity['CrossBorderFactor'])
+                v_mule_dens = opt_overrides.get(f"{scenario_type}_brt_mule_density", topo['mule_cluster_density'])
+                v_risk_floor = opt_overrides.get(f"{scenario_type}_brt_hop_v_risk_floor", 0.5)
+                holistic_hop_velocity = v_cb_factor * (1/v_mule_dens) * intensity * max(v_risk_floor, Total_Behavioral_Risk)
+              
+                
+                cycle_gap_hours = cfg['cycle_gap_hours'] / holistic_hop_velocity
+
+                # Tuning the base temporal gap
+                c_gap_base = opt_overrides.get(f"{scenario_type}_brt_cycle_gap_base", cfg.get('cycle_gap_hours', 24.0))
+                cycle_gap_hours = c_gap_base / holistic_hop_velocity
+
+                
+                # Topology: Temporal coordination via mule cluster density
+                #t_prev += timedelta(hours=float(np.random.exponential(scale=cfg['cycle_gap_hours'] * entity['CrossBorderFactor'] * (1/topo['mule_cluster_density']))))
+                t_prev += timedelta(hours=float(np.random.exponential(scale=cycle_gap_hours)))
+                
+                rows.append(_assemble_tx(acct, party_key, ref_date, t_prev, amt_hop, tx_type, cfg, label=current_label))
+
+                #rows.extend(_generate_micro_tx(t_prev, amt_hop, config, ref_date=ref_date, label=current_label))
+                
+                amt_prev = amt_hop
+
+            # --- 4. MICRO-TRANSACTIONS (Final Integration) ---
+            #rows.extend(_generate_micro_tx(t_prev, amt_prev, config, ref_date=ref_date, label=current_label,
+                                          #multiplier_override=int(cfg['micro_params']['multiplier'] * intensity)))                
+
+            
+
+
 
