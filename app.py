@@ -6580,3 +6580,601 @@ def scenario_biz_flag_personal_to_corp(acct, anchor, intensity=1.0, dist_params=
     #rows.extend(_generate_micro_tx(t_prev, max(amounts), config))
     #return rows
 
+
+
+# ---------------- Scenario mapping ----------------
+_EXTENDED_SCENARIOS = {
+    "structuring": scenario_structuring,
+    "velocity_spike": scenario_velocity_spike,
+    "round_trip": scenario_round_trip,
+    "layering": scenario_layering,
+    "biz_inflow_outflow_ratio": scenario_biz_inflow_outflow_ratio,
+    "biz_monthly_volume_deviation": scenario_biz_monthly_volume_deviation,
+    "biz_round_tripping": scenario_biz_round_tripping,
+    "biz_flag_non_nexus": scenario_biz_flag_non_nexus,
+    "biz_flag_pep_indonesia": scenario_biz_flag_pep_indonesia,
+    "biz_flag_personal_to_corp": scenario_biz_flag_personal_to_corp
+}
+
+
+def _generate_scenario_rows_for_client(acct, anchor, scenario, intensity=1.0, party_key=None, ref_date=None):
+    #fn = _EXTENDED_SCENARIOS.get(scenario, scenario_biz_inflow_outflow_ratio)
+    fn = _EXTENDED_SCENARIOS[scenario]
+    try:
+        result = fn(acct, anchor, intensity=intensity, party_key=party_key, ref_date=ref_date)
+    except TypeError:
+        #result = fn(acct, anchor, party_key=party_key)
+
+        # Fallback for functions that don't accept ref_date or intensity yet
+        try:
+            result = fn(acct, anchor, intensity=intensity, party_key=party_key)
+        except TypeError:
+            result = fn(acct, anchor, party_key=party_key)
+        
+    # Ensure we always return a list
+    if result is None:
+        return []
+    elif isinstance(result, list):
+        return result
+    else:
+        return [result]  # wrap single row in a list
+
+
+# ---------------- Synthetic generator ----------------
+def generate_synthetic_transactions(n_clients=50, days=90, scenario="biz_inflow_outflow_ratio", seed=42):   #"investment_irregularities",
+
+    def apply_cat1_noise_gap(anchor_dt, scenario_json):
+        """
+        Applies a Poisson/Log-Normal noise gap to a Cat 1 anchor 
+        based on the population statistics in the JSON.
+        """
+        # 1. Access the Population stats from your JSON
+        #temporal_cfg = scenario_json.get('temporal', {})
+        #inter_cfg = temporal_cfg.get('inter_arrival', {})
+        
+        # We use the Population Median as the most 'normal' anchor point
+        #mu_anchor = inter_cfg.get('median_days', 5.0) 
+        #sigma_anchor = inter_cfg.get('sigma_days', 2.0)
+    
+        # Direct access (will crash if 'temporal' is missing)
+        temporal_cfg = scenario_json['temporal']
+        inter_cfg = temporal_cfg['inter_arrival']
+        
+        # Extracting the specific stats you need
+        mu_anchor = inter_cfg['median_days'] 
+        sigma_anchor = inter_cfg['sigma_days']
+        dist_type = inter_cfg['distribution']
+    
+    
+        
+        # 2. Generate a "Natural" Gap
+        # We use the Poisson lambda to decide the 'jitter' size, 
+        # but we pull from the Log-Normal distribution to get the gap length
+        # to ensure the noise matches the real population's spread.
+        
+        # Convert arithmetic mean/sigma to log-normal parameters
+        phi = np.sqrt(sigma_anchor**2 + mu_anchor**2)
+        mu_log = np.log(mu_anchor**2 / phi)
+        sigma_log = np.sqrt(np.log(phi**2 / mu_anchor**2))
+        
+        # Generate the noise gap
+        noise_gap = np.random.lognormal(mu_log, sigma_log)
+        
+        # 3. Apply a Poisson "Directional Jitter" 
+        # This ensures the noise isn't always pushing forward, but clusters around the anchor.
+        direction = np.random.choice([-1, 1])
+        #final_gap = int(round(noise_gap)) * direction
+
+        # MODIFIED LINE: Explicitly cast the entire calculation to a native Python int()
+        final_gap = int(int(round(noise_gap)) * direction)
+        
+        # 4. Calculate Final Date
+        final_dt = anchor_dt + timedelta(days=final_gap)
+        
+        return final_dt
+        
+    
+    #np.random.seed(seed)
+    #random.seed(seed)
+    rows = []
+    #start_date = datetime.now() - timedelta(days=days)
+
+    # --- FIXED DATE WINDOW REQUIRED BY MANAGEMENT ---
+    LOWER_BOUND = datetime(2022, 3, 1)
+    UPPER_BOUND = datetime(2025, 2, 28)
+    total_days = (UPPER_BOUND - LOWER_BOUND).days
+    
+    # Override baseline start point
+    #start_date = LOWER_BOUND    
+
+    # Define Lookback Window (Business Sense: 1 year of history per review)
+    LOOKBACK_WINDOW = 365
+
+    # Mapping from trans_type_cd to direction
+    trans_direction_map = {
+        "INCOMING": ["001", "002", "005", "006", "053", "109", "110", "137"],
+        "OUTGOING": ["003", "004", "007", "008", "013", "045", "046", "047", "049", "111", "112", "133"]
+    }
+
+
+    # Load Category 1 Stats (Unbiased Private Banking Baseline)
+    # These should be derived from the compute_stats(tx_window) earlier
+    # Use this for Category 1 (Normal Baseline)
+
+    # --- Load JSON ---
+    with open("scenario_config.json", "r") as f:
+        scenario_config = json.load(f)
+    
+    cfgpop = scenario_config['population']
+    
+    # Ensure n_clients does not exceed the number of available synthetic parties
+    
+    available_parties = sampled_df['party_key'].unique()
+    #available_parties = synthetic_parties_df['party_key'].unique()
+    n_clients = min(n_clients, len(available_parties))
+    
+    # Sample unique party keys
+    party_keys = np.random.choice(available_parties, size=n_clients, replace=False)
+
+    # Build lookup dicts
+    party_type_lookup = synthetic_parties_df.drop_duplicates(subset='party_key', keep='last').set_index('party_key')['party_type_cd'].to_dict()
+    non_nexus_lookup = synthetic_parties_df.drop_duplicates(subset='party_key', keep='last').set_index('party_key')['non_nexus_flag'].to_dict()
+
+    # Pre-calculate Lognormal parameters to avoid doing it inside the loop
+    # arithmetic m, v -> lognormal mu, sigma
+    m = cfgpop['amt_mu']
+    v = cfgpop['amt_sigma']**2
+    phi = np.sqrt(v + m**2)
+    mu_log = np.log(m**2 / phi)
+    sigma_log = np.sqrt(np.log(phi**2 / m**2))
+    
+    
+    for i, party_key in enumerate(party_keys):
+        
+        # 1. SET UNIQUE REF_DATE PER CLIENT
+        # Reviews occur in the final 20% of the management window
+        buffer_days = int(total_days * 0.2)
+        client_ref_date = UPPER_BOUND - timedelta(days=np.random.randint(0, buffer_days))
+
+        party_type_cd = party_type_lookup[party_key]
+        non_nexus_flag = non_nexus_lookup[party_key]
+        
+        n_accounts = np.random.randint(1,4)
+        accounts = [f"SYN_{1000+i}_{j}" for j in range(n_accounts)]
+    
+        for acct in accounts:
+            # baseline neutral transactions
+            n_baseline = np.random.randint(max(5, days//4), max(10, days//1))
+            for _ in range(n_baseline):
+                
+                #t = start_date + timedelta(days=np.random.uniform(0, days))
+                #t = start_date + timedelta(days=np.random.uniform(0, total_days))
+                #2. GENERATE TRANSACTION DATE
+                # Uniformly distributed within the 365-day lookback
+                days_prior=np.random.uniform(0, LOOKBACK_WINDOW)
+                transaction_date=client_ref_date - timedelta(days=days_prior)
+
+                # 2. APPLY POPULATION NOISE (The "Jitter")
+                # Do this BEFORE the safety check so the check can catch any "out-of-bounds" noise
+                transaction_date = apply_cat1_noise_gap(transaction_date, scenario_config)
+
+                
+                # Safety check: Ensure we don't exceed the global LOWER_BOUND
+                if transaction_date < LOWER_BOUND:
+                    transaction_date = LOWER_BOUND + timedelta(days=np.random.randint(0, 30))
+                    
+                # Calculate days_prior_review for the model features
+                days_prior_review = (client_ref_date - transaction_date).days
+                
+                #amt = round(float(np.random.exponential(scale=800)),2)
+
+                # 3. UNBIASED LOGNORMAL AMOUNT GENERATION
+                # Replaces np.random.exponential(scale=800)
+                amt_raw = np.random.lognormal(mean=mu_log, sigma=sigma_log)
+                
+                # Clip to population min/max to prevent extreme outliers while staying positive
+                amt = round(float(np.clip(amt_raw, cfgpop['amt_min'], cfgpop['amt_max'])), 2)
+                
+                cp = random.choice(["SG","HK","US","CN"])
+
+
+                # Noise is negative or zero
+                #noise_days = -np.random.uniform(0.5, 14)  # e.g., up to 14 days before ref_date
+                #transaction_date = t + timedelta(days=noise_days)
+                #days_prior_review = (t - transaction_date).days
+                
+                # --- Generate trans_type_cd ---
+                trans_type_cd = sample_from_transactions(txn_map, "trans_type_cd")    #_biased_trans_type_cd()  # or your logic
+
+                #tx_type = random.choice(["CREDIT","DEBIT"])  #,"TRANSFER","RECEIVE"])
+                
+                # --- Determine direction based on trans_type_cd ---
+                if trans_type_cd in trans_direction_map["INCOMING"]:
+                    trans_direction = "INCOMING"
+                    tx_type = "CREDIT"  # Money coming in is always a credit to the user
+                elif trans_type_cd in trans_direction_map["OUTGOING"]:
+                    trans_direction = "OUTGOING"
+                    tx_type = "DEBIT"   # Money going out is always a debit to the user
+                #else:
+                    #trans_direction = random.choice(["INCOMING","OUTGOING"])
+                
+                rows.append([
+                    acct, party_key, client_ref_date, tx_type, amt, cp,
+                    round(_rand_balance(),2), _rand_party_country(),
+                    0, False,
+                    party_type_cd,    
+                    non_nexus_flag,    
+                    sample_from_transactions(txn_map, "acct_currency_cd"),   #_biased_acct_currency(),
+                    _rand_transaction_key(acct, transaction_date), 
+                    trans_type_cd,   
+                    sample_from_transactions(txn_map, "channel_type_cd"),   #_biased_channel_type(),
+                    sample_from_transactions(txn_map, "transaction_strings"),   #_biased_transaction_strings(), 
+                    sample_from_transactions(txn_map, "cashier_order_flag"),   #_biased_cashier_order_flag(),
+                    _rand_local_currency(amt), 
+                    days_prior_review,         
+                    trans_direction,     
+                    transaction_date.strftime('%Y-%m-%d %H:%M:%S')     
+                ])
+
+            # Inject scenario-driven suspicious transactions
+            #anchor = start_date + timedelta(days=np.random.uniform(days*0.6, days))
+
+            # 3. INJECT SCENARIO ROWS
+            anchor = client_ref_date - timedelta(days=np.random.randint(2, 15))
+            #rows += _generate_scenario_rows_for_client(acct, anchor, scenario, intensity=1.0, party_key=party_key)
+
+    cols = ['account_key','party_key','ref_date','tx_type','amount','cp_country','balance','party_country',
+            'label_suspicious','injected_flag','party_type_cd','non_nexus_flag','acct_currency_cd','transaction_key',
+            'trans_type_cd','channel_type_cd','transaction_strings','cashier_order_flag','local_currency',
+            'days_prior_review','trans_direction','transaction_date']
+
+    df = pd.DataFrame(rows, columns=cols)
+    df['ref_date'] = pd.to_datetime(df['ref_date'])
+    df.sort_values(['party_key','account_key','ref_date'], inplace=True)
+    return df
+
+# ---------------- Hybrid injector ----------------
+def inject_synthetic_segments(df_real, scenario="biz_inflow_outflow_ratio",    #"investment_irregularities",
+                              ratio=0.02, seed=42, intensity=1.0,
+                              anchors_per_client=2, anchor_jitter_days=10, mode="generate"):   # <-- pass mode here):
+
+    def apply_cat1_noise_gap(anchor_dt, scenario_json):
+        """
+        Applies a Poisson/Log-Normal noise gap to a Cat 1 anchor 
+        based on the population statistics in the JSON.
+        """
+        # 1. Access the Population stats from your JSON
+        #temporal_cfg = scenario_json.get('temporal', {})
+        #inter_cfg = temporal_cfg.get('inter_arrival', {})
+        
+        # We use the Population Median as the most 'normal' anchor point
+        #mu_anchor = inter_cfg.get('median_days', 5.0) 
+        #sigma_anchor = inter_cfg.get('sigma_days', 2.0)
+    
+        # Direct access (will crash if 'temporal' is missing)
+        temporal_cfg = scenario_json['temporal']
+        inter_cfg = temporal_cfg['inter_arrival']
+        
+        # Extracting the specific stats you need
+        mu_anchor = inter_cfg['median_days'] 
+        sigma_anchor = inter_cfg['sigma_days']
+        dist_type = inter_cfg['distribution']
+    
+    
+        
+        # 2. Generate a "Natural" Gap
+        # We use the Poisson lambda to decide the 'jitter' size, 
+        # but we pull from the Log-Normal distribution to get the gap length
+        # to ensure the noise matches the real population's spread.
+        
+        # Convert arithmetic mean/sigma to log-normal parameters
+        phi = np.sqrt(sigma_anchor**2 + mu_anchor**2)
+        mu_log = np.log(mu_anchor**2 / phi)
+        sigma_log = np.sqrt(np.log(phi**2 / mu_anchor**2))
+        
+        # Generate the noise gap
+        noise_gap = np.random.lognormal(mu_log, sigma_log)
+        
+        # 3. Apply a Poisson "Directional Jitter" 
+        # This ensures the noise isn't always pushing forward, but clusters around the anchor.
+        direction = np.random.choice([-1, 1])
+        #final_gap = int(round(noise_gap)) * direction
+
+        # MODIFIED LINE: Explicitly cast the entire calculation to a native Python int()
+        final_gap = int(int(round(noise_gap)) * direction)
+        
+        # 4. Calculate Final Date
+        final_dt = anchor_dt + timedelta(days=final_gap)
+        
+        return final_dt
+        
+
+    # --- Load JSON ---
+    with open("scenario_config.json", "r") as f:
+        scenario_config = json.load(f)    
+
+    
+    LOWER_BOUND = datetime(2022, 3, 1)
+    UPPER_BOUND = datetime(2025, 2, 28)
+    total_days = (UPPER_BOUND - LOWER_BOUND).days
+    
+    #np.random.seed(seed)
+    #random.seed(seed)
+    df = df_real.copy()
+    required_cols = ['account_key','party_key','ref_date','tx_type','amount','cp_country','balance','party_country',
+                     'label_suspicious','injected_flag','party_type_cd','non_nexus_flag','acct_currency_cd','transaction_key',
+                     'trans_type_cd','channel_type_cd','transaction_strings','cashier_order_flag','local_currency',
+                     'days_prior_review','trans_direction','transaction_date']
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Input DF missing expected columns: {missing}")
+    df = df[required_cols]
+    if not np.issubdtype(df['ref_date'].dtype, np.datetime64):
+        df['ref_date'] = pd.to_datetime(df['ref_date'], errors='coerce')
+
+    # PARTY-LEVEL SELECTION
+    party_ids = df['party_key'].unique().tolist()
+    n_inject = max(1, int(len(party_ids) * ratio))
+    selected_parties = random.sample(party_ids, n_inject)
+
+    new_rows = []
+    for party in selected_parties:
+
+        client_ref_date = df.loc[df['party_key']==party, 'ref_date'].iloc[0]
+        party_type_cd = df.loc[df['party_key']==party, 'party_type_cd'].iloc[0]
+        non_nexus_flag = df.loc[df['party_key']==party, 'non_nexus_flag'].iloc[0]
+       
+        accounts = df.loc[df['party_key']==party,'account_key'].unique().tolist()
+
+        for acct in accounts:
+            # 2. GENERATE MULTIPLE ANCHORS PER ACCOUNT
+            # Business Sense: Simulates recurring suspicious activity or layering stages.
+
+            for _ in range(anchors_per_client):
+
+                # 3. DEFINE ANCHORS WITHIN THE LOOKBACK WINDOW
+                # We use a wider range (e.g., 2 to 90 days) so multiple bursts don't overlap too much.
+
+                anchor_j = client_ref_date - timedelta(days=np.random.uniform(2, 90))
+
+                # 2. APPLY POPULATION NOISE (The "Jitter")
+                # Do this BEFORE the safety check so the check can catch any "out-of-bounds" noise
+                anchor_j = apply_cat1_noise_gap(anchor_j, scenario_config)
+                
+
+                # 4. GENERATE SCENARIO ROWS (A BATCH of transactions per anchor)
+                # Our Typology Engine creates a cluster of transactions around anchor_j.
+
+                #print(f"--- Starting Synthetic Generation for Party: {party} | Account: {acct} ---")
+                rows = _generate_scenario_rows_for_client(acct, anchor_j, scenario, intensity=intensity, party_key=party, ref_date=client_ref_date)   # <----Pass the fixed date here
+
+                # --- NEW INTERIM OUTPUT ---
+                #row_count = len(rows) if rows else 0
+                #print(f"===> COMPLETED: Created {row_count} rows for Account: {acct}")
+                
+                #if row_count > 0:
+                    # Print the first row to verify columns and data quality
+                    #print(f"Sample Row Preview: {rows[0]}")
+                #else:
+                    #print("WARNING: Zero rows returned for this anchor.")
+                # --------------------------
+                
+                temp_df = pd.DataFrame(rows, columns=required_cols)
+
+                # 3. Now can use the column name safely
+                temp_df['ref_date'] = client_ref_date
+                temp_df['party_type_cd'] = party_type_cd
+                temp_df['non_nexus_flag'] = non_nexus_flag
+                
+                # 4. Store this DataFrame in your collection list
+                new_rows.append(temp_df) 
+                
+                #new_rows.extend(rows)            
+
+    # 5. Outside the loops, combine all DataFrames in the list into one
+    if new_rows:
+        df_new = pd.concat(new_rows, ignore_index=True)
+        df_new['transaction_date'] = pd.to_datetime(df_new['transaction_date'])
+        df_new['ref_date'] = pd.to_datetime(df_new['ref_date'])
+        df_new['days_prior_review'] = ( df_new['ref_date'] - df_new['transaction_date'] ).dt.days
+    else:
+        df_new = pd.DataFrame(columns=required_cols)
+    
+    df_aug = pd.concat([df, df_new], ignore_index=True)
+    df_aug.sort_values(['party_key','account_key','ref_date'], inplace=True)
+    
+    audit = {
+        "scenario": scenario,
+        "parties_injected": len(selected_parties),
+        "rows_added": len(df_new),
+        "ratio": ratio,
+        "intensity": intensity,
+        "timestamp": datetime.now().isoformat(),
+        "mode": mode
+    }
+    #print("[INFO] Injection complete:", audit)
+
+    # after building df_aug and audit
+    if mode == "inject":
+        print(f"[INFO] Injection complete: {audit}")
+    else:
+        print(f"[INFO] Generation complete: {audit}")
+
+    return df_aug, audit
+
+# ---------------- Example / Runner -----------------
+if __name__ == "__main__":
+    import os
+
+    # ---------------- User Parameters -----------------
+    mode = "generate"    #"inject"  # or "generate"
+    #scenarios = ["biz_inflow_outflow_ratio",  "structuring", "velocity_spike",  "round_trip", "layering", "biz_inflow_outflow_ratio", "biz_monthly_volume_deviation", "biz_round_tripping", "biz_flag_non_nexus", "biz_flag_pep_indonesia", "biz_flag_personal_to_corp"]
+    scenarios = ["structuring", "layering", "velocity_spike", "biz_inflow_outflow_ratio",  "biz_monthly_volume_deviation", "biz_round_tripping", "biz_flag_non_nexus", "biz_flag_pep_indonesia", "biz_flag_personal_to_corp"]
+    input_file = "df_like_df3_transactions.csv"
+    ratio = 1  #0.04
+    seed = 42
+    intensity = 2.0
+    anchors_per_client = 2
+    anchor_jitter_days = 20
+    save_output_csv = False
+
+    # ---------------- Prepare Input Data -----------------
+    if mode=="inject":
+        if os.path.exists(input_file):
+            df_real = synthetic_parties_df       #pd.read_csv(input_file, parse_dates=["ref_date"])
+        else:
+            print(f"[WARN] Input file '{input_file}' not found; creating mock dataset.")
+            cols = [
+                'account_key','party_key','ref_date','tx_type','amount','cp_country','balance','party_country',
+                'label_suspicious','injected_flag','party_type_cd','non_nexus_flag','acct_currency_cd','transaction_key',
+                'trans_type_cd','channel_type_cd','transaction_strings','cashier_order_flag','local_currency',
+                'days_prior_review','trans_direction','transaction_date'
+            ]
+            rows = []
+            n_clients = 50
+            days = 180
+            start = datetime.now() - timedelta(days=days)
+            for i in range(n_clients):
+                party_key = f"PARTY_{1000+i}"
+                n_accounts = random.randint(1,3)
+                accounts = [f"C{1000+i}_{j}" for j in range(n_accounts)]
+                for acct in accounts:
+                    n_baseline = random.randint(20,120)
+                    for _ in range(n_baseline):
+                        t = start + timedelta(days=random.uniform(0,days))
+                        amt = round(random.uniform(50,5000),2)
+                        rows.append([
+                            acct, party_key, t, random.choice(['CREDIT','DEBIT','TRANSFER']),
+                            amt, random.choice(['SG','HK','US']), round(_rand_balance(),2), _rand_party_country(),
+                            0, False, _rand_party_type(), _rand_non_nexus_flag(), _rand_acct_currency(),
+                            _rand_transaction_key(acct,t), _rand_trans_type_cd(), _rand_channel_type(),
+                            _rand_transaction_strings(), _rand_cashier_order_flag(),
+                            _rand_local_currency(amt), _rand_days_prior_review(),
+                            _rand_trans_direction(), _rand_transaction_date(t)
+                        ])
+            df_real = pd.DataFrame(rows, columns=cols)
+            if save_output_csv:
+                df_real.to_csv(input_file, index=False)
+                print(f"[INFO] Mock dataset saved ({len(df_real)} rows).")
+
+    elif mode=="generate":
+        #df_real = generate_synthetic_transactions(n_clients=200, days=365, scenario=scenarios[0], seed=seed)        #df_real = generate_synthetic_transactions(n_clients=5000, days=365, scenario=scenarios[0], seed=seed)
+
+        df_synth = pd.DataFrame()
+        
+        for i, scenario in enumerate(scenarios):
+            seed_j=42+i
+            np.random.seed(seed_j)
+            random.seed(seed_j)
+       
+            # ---------------- Inject Synthetic Segments -----------------
+            #df_real = generate_synthetic_transactions(n_clients=5000, days=365, scenario=scenario, seed=seed_j)
+            df_real = generate_synthetic_transactions(n_clients=50, days=365, scenario=scenario, seed=seed_j)
+            
+
+            # Ensure all required columns exist
+            required_cols = [
+                'account_key','party_key','ref_date','tx_type','amount','cp_country','balance','party_country',
+                'label_suspicious','injected_flag','party_type_cd','non_nexus_flag','acct_currency_cd','transaction_key',
+                'trans_type_cd','channel_type_cd','transaction_strings','cashier_order_flag','local_currency',
+                'days_prior_review','trans_direction','transaction_date'
+            ]
+           
+            for col in required_cols:
+                if col not in df_real.columns:
+                    # For boolean flags, default to False; for numeric columns, default to 0; otherwise NaN
+                    if col in ['label_suspicious', 'injected_flag', 'non_nexus_flag','cashier_order_flag']:
+                        df_real[col] = False
+                    elif col in ['amount','balance','local_currency','days_prior_review']:
+                        df_real[col] = 0.0
+                    else:
+                        df_real[col] = np.nan
+
+           
+            seed_i=42+i+100
+            np.random.seed(seed_i)
+            random.seed(seed_i)
+
+
+            # ---------------- Inject Synthetic Segments -----------------
+            df_aug, audit = inject_synthetic_segments(
+                df_real,
+                scenario=scenario,
+                ratio=ratio,
+                seed=seed_i, 
+                #seed=seed,
+                intensity=intensity,
+                anchors_per_client=anchors_per_client,
+                anchor_jitter_days=anchor_jitter_days
+            )
+        
+            print("Audit:", audit)
+            #new_rows_df = df_aug[df_aug['injected_flag']==1]
+            new_rows_df = df_aug[df_aug['injected_flag'] == True]
+        
+            
+            print(f"[INFO] Number of synthetic rows of Cat 2 and Cat 3 injected: {len(new_rows_df)}")
+            display(new_rows_df)
+        
+        
+            #df_synth_partial = df_aug[(df_aug['injected_flag'].astype(bool)) ]   # & (df_aug['label_suspicious'] == 1)]
+            df_synth_partial = df_aug.copy()
+    
+            #df_synth_partial = df_synth_partial.copy()
+            df_synth_partial['typology'] = scenario
+
+            # Append to master synthetic collection
+            df_synth = pd.concat([df_synth, df_synth_partial], axis=0, ignore_index=True)
+
+        # Final Verification
+        
+        # 1. Identify which rows are Category 1 (Normal) and which are Injected (Cat 2/3)
+        # In your code, injected_flag separates these populations.
+        mask_injected = df_synth['injected_flag'] == True
+        mask_normal = ~mask_injected
+        
+        # 2. Split the DataFrame temporarily
+        df_normal = df_synth[mask_normal].copy()
+        df_injected = df_synth[mask_injected].copy()
+        
+        # 3. De-duplicate ONLY the normal baseline
+        # Use a 'logical key' to catch repeats across different scenario runs
+        logical_key = ['party_key', 'amount', 'transaction_date', 'trans_type_cd']
+        df_normal_clean = df_normal.drop_duplicates(subset=logical_key, keep='first')
+        
+        # 4. Re-combine for the final training set
+        df_final = pd.concat([df_normal_clean, df_injected], axis=0, ignore_index=True)
+        
+        print(f"[INFO] Rows removed by de-duplication: {len(df_normal) - len(df_normal_clean)}")
+        
+        # 2. Re-assign to df_synth (The Standard Variable for downstream)
+        df_synth=df_final.copy()
+
+        
+        print(f"[SUCCESS] Final df_synth shape: {df_synth.shape}")
+        if 'transactional_suspicious' in df_synth.columns:
+            print("[INFO] Columns successfully rename for legacy compatibility.")
+            
+        #df_real_only = df_real[df_real['injected_flag'] == 0]
+    
+        print(f"[INFO] Synthetic rows: {len(df_synth)}")
+
+
+        # 1. Force conversion to datetime64[ns]
+        # 2. Use 'errors=coerce' to turn bad formats into NaT (Not a Time)
+        # 3. Use .astype to explicitly signal the intent to the Arrow engine
+        df_synth['transaction_date'] = pd.to_datetime(df_synth['transaction_date'], errors='coerce')
+        
+        print(f"[INFO] Final Save: Row count {len(df_synth)}")
+        
+        # Ensure we aren't saving as 'object'
+        if df_synth['transaction_date'].dtype == 'object':
+            df_synth['transaction_date'] = df_synth['transaction_date'].astype('datetime64[ns]')
+        
+        
+        df_synth.to_parquet("transactions_df_synth_with_typology.parquet")
+        #df_synth.drop('typology', axis=1, inplace=True)
+    
+    
+        df_synth.rename(columns={"amount": "acct_currency_amount"}, inplace=True)
+        #df_real_only.rename(columns={"amount": "acct_currency_amount"}, inplace=True)
