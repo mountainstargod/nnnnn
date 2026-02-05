@@ -1190,3 +1190,659 @@ def generate_events_from_params(acct, ref_date, anchor, intensity, params, party
         #rows.extend(_generate_micro_tx(t_trade, amt, config, ref_date=ref_date, label=current_label))
 
 
+
+    
+    
+    # ------------------ Velocity Spike Function ------------------
+
+    elif scenario_type == "velocity_spike":
+        cfg = scenario_config['velocity_spike']
+        # The "Handshake": Pull weights directly from the optimized JSON branch
+        dw = cfg["demographics"] 
+        
+        # 1. Sample Actor Attributes
+        is_pep = random.random() < 0.1
+        is_biz = random.random() < 0.3
+        is_young = random.choice([True, False])
+        risk_score = random.uniform(0, 1)
+
+
+        
+
+        # --- 2026 OPTIMIZED VELOCITY ACTOR SAMPLING ---
+        # Instead of fixed 0.1 or 0.3, we use Optuna overrides to warp the 
+        # probability of selecting a high-risk actor profile.
+        
+        # 1. Sample PEP (Boolean)
+        # Optuna tunes 'velocity_spike_PEP_prob' to find the best mix for detection
+        pep_prob = opt_overrides.get(f"{scenario_type}_PEP_prob", 0.1)
+        is_pep = np.random.binomial(1, pep_prob) == 1
+        
+        # 2. Sample Entity Type (Business vs Individual)
+        # Optuna tunes 'velocity_spike_Business_prob'
+        biz_prob = opt_overrides.get(f"{scenario_type}_Business_prob", 0.3)
+        is_biz = np.random.binomial(1, biz_prob) == 1
+        
+        # 3. Sample Youth Status (Boolean)
+        # Optuna tunes 'velocity_spike_Youth_prob' to trigger 'youth_boost' multipliers
+        youth_prob = opt_overrides.get(f"{scenario_type}_Youth_prob", 0.5)
+        is_young = np.random.binomial(1, youth_prob) == 1
+        
+        # 4. Sample Baseline Risk Score (Continuous 0.0 - 1.0)
+        # Optuna can shift the alpha/beta of a Beta distribution to skew risk higher/lower
+        # but for a direct replacement of random.uniform:
+        risk_shift = opt_overrides.get(f"{scenario_type}_risk_skew", 1.0)
+        # Power-shifting a uniform sample skews the baseline actor risk
+        risk_score = np.random.uniform(0, 1) ** (1 / risk_shift)
+
+        # Construct actor object for downstream multiplier application
+        actor = {
+            "PEP": is_pep,
+            "EntityType": 1 if is_biz else 0, # Mapping Business to 1
+            "AgeGroup": 0 if is_young else 1,  # Mapping Young to 0
+            "BaseRisk": risk_score
+        }
+
+        
+        # --- NEW CODE: Incorporate Network/Channel/Economic Factors into Risk Score ---
+        # We need proxy variables for these new dimensions for demonstration purposes in this snippet
+        # In a full simulator, these would be sampled like the other demographics.
+        network_centrality_score = random.uniform(1.0, cfg['network_topology']['centrality_threshold'])
+        channel_hop_score = random.uniform(1.0, cfg['channel_config']['hop_intensity_multiplier'])
+        savings_drain_ratio = random.uniform(0.1, cfg['economic_sensibility']['savings_drain_threshold'])
+
+
+
+        # 1. Resolve Dictionaries
+        topo = cfg.get('network_topology', {})
+        chan = cfg.get('channel_config', {})
+        econ = cfg.get('economic_sensibility', {})
+
+        # 2. Extract Overrides using your established pattern
+        # This resolves: Optuna -> Config Dict -> Hardcoded Default
+        c_limit = opt_overrides.get(f"{scenario_type}_centrality_threshold", topo.get('centrality_threshold', 3.5))
+        h_limit = opt_overrides.get(f"{scenario_type}_hop_multiplier", chan.get('hop_intensity_multiplier', 2.2))
+        d_limit = opt_overrides.get(f"{scenario_type}_drain_threshold", econ.get('savings_drain_threshold', 0.9))
+
+        # --- OPTIMIZED BOUNDS (REPLACING HARD-CODED 1.0 AND 0.1) ---
+        c_floor = opt_overrides.get(f"{scenario_type}_centrality_floor", 1.0)
+        h_floor = opt_overrides.get(f"{scenario_type}_hop_floor", 1.0)
+        d_floor = opt_overrides.get(f"{scenario_type}_drain_floor", 0.1)
+        
+        # 3. Dynamic Sampling (2026 Optimization)
+        # The 'Physics' of the simulation is now controlled by the Bayesian Loop
+
+        network_centrality_score = random.uniform(1.0, cfg['network_topology']['centrality_threshold'])
+        channel_hop_score = random.uniform(1.0, cfg['channel_config']['hop_intensity_multiplier'])
+        savings_drain_ratio = random.uniform(0.1, cfg['economic_sensibility']['savings_drain_threshold'])
+
+        
+        network_centrality_score = random.uniform(c_floor, c_limit)
+        channel_hop_score        = random.uniform(h_floor, h_limit)
+        savings_drain_ratio      = random.uniform(d_floor, d_limit)
+
+        
+        # 2. Compute COMPOUND Scaling Factors (Multiplicative for Huge Size)
+        # We multiply instead of adding to ensure the "Spike" is unmistakable
+        F_burst = ( (dw["F_burst"]["PEP"] if is_pep else 1.0) * 
+                    (dw["F_burst"]["Business"] if is_biz else 1.0) * 
+                    (1 + risk_score * dw["F_burst"]["risk_score_scale"]) )
+
+
+        # --- F_burst: Calibrated Multipliers ---
+        # Optuna targets: PEP impact, Business impact, and the Risk Score Scale
+        f_burst_pep = opt_overrides.get(f"{scenario_type}_F_burst_PEP", dw["F_burst"].get("PEP", 2.5))
+        f_burst_biz = opt_overrides.get(f"{scenario_type}_F_burst_Business", dw["F_burst"].get("Business", 1.5))
+        f_burst_rss = opt_overrides.get(f"{scenario_type}_F_burst_risk_scale", dw["F_burst"].get("risk_score_scale", 2.0))
+
+        f_burst_pep_n = opt_overrides.get(f"{scenario_type}_F_burst_PEP_neutral", 1.0)
+        f_burst_biz_n = opt_overrides.get(f"{scenario_type}_F_burst_Business_neutral", 1.0)
+        
+        F_burst = ( (f_burst_pep if is_pep else f_burst_pep_n) * 
+                    (f_burst_biz if is_biz else f_burst_biz_n) * 
+                    (1 + risk_score * f_burst_rss) 
+
+
+        F_size = ( (1 + risk_score * dw["F_size"]["risk_score_scale"]) * 
+                   (dw["F_size"]["Business"] if is_biz else 1.0) * 
+                   (dw["F_size"]["youth_boost"] if is_young else 1.0) )
+
+        # --- F_size: Calibrated Multipliers ---
+        # Optuna targets: Youth boost, Business impact, and Risk Score Scale
+        f_size_rss   = opt_overrides.get(f"{scenario_type}_F_size_risk_scale", dw["F_size"].get("risk_score_scale", 1.8))
+        f_size_biz   = opt_overrides.get(f"{scenario_type}_F_size_Business", dw["F_size"].get("Business", 1.4))
+        f_size_youth = opt_overrides.get(f"{scenario_type}_F_size_youth_boost", dw["F_size"].get("youth_boost", 1.2))
+
+        f_size_biz_n   = opt_overrides.get(f"{scenario_type}_F_size_Business_neutral", 1.0)
+        f_size_youth_n = opt_overrides.get(f"{scenario_type}_F_size_youth_neutral", 1.0)
+        
+        F_size = ( (1 + risk_score * f_size_rss) * 
+                   (f_size_biz if is_biz else f_size_biz_n) * 
+                   (f_size_youth if is_young else f_size_youth_n) )
+
+        
+        # Compression factors for Velocity (Timing)
+        F_inter = (1 + risk_score * dw["F_inter"]["risk_score_scale"]) * (dw["F_inter"]["youth_boost"] if is_young else 1.0)
+
+
+        # --- F_inter: Inter-arrival Calibration ---
+        f_inter_rss   = opt_overrides.get(f"{scenario_type}_F_inter_risk_scale", dw["F_inter"].get("risk_score_scale", 2.5))
+        f_inter_youth = opt_overrides.get(f"{scenario_type}_F_inter_youth_boost", dw["F_inter"].get("youth_boost", 1.5))
+        f_inter_y_n   = opt_overrides.get(f"{scenario_type}_F_inter_youth_neutral", 1.0)
+
+        F_inter = (1 + risk_score * f_inter_rss) * (f_inter_youth if is_young else f_inter_y_n)
+
+        
+        F_intra = (1 + risk_score * dw["F_intra"]["risk_score_scale"]) * (dw["F_intra"]["youth_boost"] if is_young else 1.0)
+
+
+        # --- F_intra: Intra-burst Calibration ---
+        f_intra_rss   = opt_overrides.get(f"{scenario_type}_F_intra_risk_scale", dw["F_intra"].get("risk_score_scale", 3.0))
+        f_intra_youth = opt_overrides.get(f"{scenario_type}_F_intra_youth_boost", dw["F_intra"].get("youth_boost", 2.0))
+        f_intra_y_n   = opt_overrides.get(f"{scenario_type}_F_intra_youth_neutral", 1.0)
+
+        F_intra = (1 + risk_score * f_intra_rss) * (f_intra_youth if is_young else f_intra_y_n)
+
+        
+        F_amt = ( (dw["F_amt"]["PEP"] if is_pep else 1.0) * (1 + risk_score * dw["F_amt"]["risk_score_scale"]) )
+
+        # --- F_amt: Amount Scaling Calibration ---
+        f_amt_pep   = opt_overrides.get(f"{scenario_type}_F_amt_PEP", dw["F_amt"].get("PEP", 2.2))
+        f_amt_pep_n = opt_overrides.get(f"{scenario_type}_F_amt_PEP_neutral", 1.0)
+        f_amt_rss   = opt_overrides.get(f"{scenario_type}_F_amt_risk_scale", dw["F_amt"].get("risk_score_scale", 1.5))
+
+        F_amt = (f_amt_pep if is_pep else f_amt_pep_n) * (1 + risk_score * f_amt_rss)        
+
+        # --- NEW CODE: Define F_type factors based on attributes ---
+        # Business accounts tend to have more DEBIT/CREDIT (supplier payments/customer receipts)
+        # Young individuals might lean slightly more towards P2P
+        #F_type_debit = 1.0 + (0.3 if is_biz else 0.0)
+        #F_type_credit = 1.0 + (0.3 if is_biz else 0.0)
+
+        # 2026 Optimized Logic: Asymmetrical Scaling
+        # Business spikes are usually directional (e.g., rapid dispersal)
+        # We increase DEBIT more aggressively to simulate 'Layering Outflow'
+        F_type_debit = 1.0 + (0.5 if is_biz else 0.0)
+        F_type_credit = 1.0 + (0.2 if is_biz else 0.0)
+
+
+        
+        # --- F_type: Asymmetrical Scaling Calibration (Block 3) ---
+        
+        # Business Spikes: Layering Outflow (DEBIT > CREDIT)
+        f_debit_n = opt_overrides.get(f"{scenario_type}_F_type_debit_neutral", 1.0)
+        debit_boost_biz  = opt_overrides.get(f"{scenario_type}_F_type_debit_biz_boost", 0.5)
+        f_debit_nonbiz = opt_overrides.get(f"{scenario_type}_F_type_debit_nonbiz_val", 0.0)
+        
+        F_type_debit = f_debit_n + (debit_boost_biz if is_biz else f_debit_nonbiz)
+
+        
+        f_credit_n = opt_overrides.get(f"{scenario_type}_F_type_credit_neutral", 1.0)        
+        credit_boost_biz = opt_overrides.get(f"{scenario_type}_F_type_credit_biz_boost", 0.2)
+        f_credit_nonbiz = opt_overrides.get(f"{scenario_type}_F_type_credit_nonbiz_val", 0.0)
+        
+        F_type_credit = f_credit_n + (credit_boost_biz if is_biz else f_credit_nonbiz)
+
+        
+        #F_type_p2p = 1.0 + (0.2 if is_young else 0.0)
+        F_type_p2p = 1.0 + (0.2 if is_young else 0.0) + (0.5 if network_centrality_score > 2.5 else 0.0)
+
+
+        # P2P Scaling: Youth and Network Centrality
+        f_p2p_n = opt_overrides.get(f"{scenario_type}_F_type_p2p_neutral", 1.0)
+        p2p_young_boost = opt_overrides.get(f"{scenario_type}_F_type_p2p_young_boost", 0.2)
+        f_p2p_nonyouth = opt_overrides.get(f"{scenario_type}_F_type_p2p_nonyouth_val", 0.0)
+        p2p_cent_boost  = opt_overrides.get(f"{scenario_type}_F_type_p2p_centrality_boost", 0.5)
+        cent_p2p_thresh = opt_overrides.get(f"{scenario_type}_centrality_p2p_threshold", 2.5) # The hardcoded 2.5 limit
+        f_p2p_lowcent = opt_overrides.get(f"{scenario_type}_F_type_p2p_lowcentral_val", 0.0)
+        
+        
+        F_type_p2p = f_p2p_n + (p2p_young_boost if is_young else f_p2p_nonyouth) + \
+                     (p2p_cent_boost if network_centrality_score > cent_p2p_thresh else f_p2p_lowcent)
+        
+
+        # --- 1. IMPROVED CALIBRATION STEP (RISK-WEIGHTED) ---
+        # The PROBABILITY of an intense spike is now based on combined risk factors
+        Total_Behavioral_Risk = F_burst * F_size * F_inter * F_intra * F_amt * network_centrality_score * channel_hop_score
+
+
+        
+        # --- MODIFIED: Log-Compress the risk to prevent exponential explosion ---
+
+        compressed_total_risk = 1 + np.log1p(Total_Behavioral_Risk)
+
+        
+        # --- 2026 OPTIMIZED ACTIVATION LOGIC ---
+        
+        # 1. Logic Constants (Block 4 Overrides)
+        s_log_adj = opt_overrides.get(f"{scenario_type}_risk_log_base_adj", 1.0)
+
+        # 2. Optimized Risk Compression
+        # Optuna tunes 's_log_adj' to see how sensitive the spike is to risk
+        compressed_total_risk = s_log_adj + np.log1p(Total_Behavioral_Risk)
+        
+
+
+
+        spike_prob = min(0.8, 0.15 + (compressed_total_risk / 20.0)) # Scaled for compressed value
+
+        s_ceiling = opt_overrides.get(f"{scenario_type}_spike_prob_ceiling", 0.8)
+        s_floor   = opt_overrides.get(f"{scenario_type}_spike_prob_floor", 0.15)
+        s_divisor = opt_overrides.get(f"{scenario_type}_risk_scaling_divisor", 20.0)
+
+        # 3. Optimized Spike Probability
+        # Optuna tunes floor, ceiling, and divisor to find the "Sweet Spot" for Recall
+        spike_prob = min(s_ceiling, s_floor + (compressed_total_risk / s_divisor))
+
+
+        # Higher total risk increases the chance of intense, aggressive behavior
+        # Use a scaled probability based on the new combined risk factors
+
+        # --- 2026 HOLISTIC INTENSITY REFACTOR ---
+        # Total_Behavioral_Risk incorporates Network, Channel, and Demographic factors
+        #spike_prob = min(0.8, 0.15 + (Total_Behavioral_Risk / 100.0))
+
+
+        if np.random.random() < spike_prob:
+            # Use compressed risk for scaling to keep intensity manageable
+            # Change the divisor from 10.0 to 20.0 to dampen the intensity
+            risk_scaling = 1 + (compressed_total_risk / 20.0)
+            
+            intensity = np.random.uniform(2.0, 4.0) * risk_scaling
+        else:
+            intensity = np.random.uniform(0.9, 1.1)
+        
+        #if np.random.random() < spike_prob:
+            # INTEGRATED LOGIC: Aggression scales with the holistic risk profile
+            #risk_scaling = 1 + (Total_Behavioral_Risk / 200.0)
+            #intensity = np.random.uniform(2.0, 4.0) * risk_scaling
+        #else:
+            # Baseline protection for 'Normal' profiles
+            #intensity = np.random.uniform(0.9, 1.1)
+
+
+        # --- 2026 CALIBRATED INTENSITY ---
+        if np.random.random() < spike_prob:
+            # 1. Resolve Magnitude Divisor (Optimizing the 20.0)
+            i_baseline = opt_overrides.get(f"{scenario_type}_intensity_baseline", 1.0)
+            mag_divisor = opt_overrides.get(f"{scenario_type}_intensity_mag_divisor", 20.0)
+            
+            risk_scaling = i_baseline + (compressed_total_risk / mag_divisor)
+            
+            # 2. Resolve High Intensity Range (Optimizing 2.0 and 4.0)
+            i_high_min = opt_overrides.get(f"{scenario_type}_intensity_high_min", 2.0)
+            i_high_max = opt_overrides.get(f"{scenario_type}_intensity_high_max", 4.0)
+            
+            intensity = np.random.uniform(i_high_min, i_high_max) * risk_scaling
+        else:
+            # 3. Resolve Low Intensity Range (Optimizing 0.9 and 1.1)
+            i_low_min = opt_overrides.get(f"{scenario_type}_intensity_low_min", 0.9)
+            i_low_max = opt_overrides.get(f"{scenario_type}_intensity_low_max", 1.1)
+            
+            intensity = np.random.uniform(i_low_min, i_low_max)
+
+
+            
+        rows = []
+        t_prev = anchor
+
+
+
+        # --- MODIFIED: Use Log-compressed factors for loop counts ---
+        n_bursts = max(2, int(cfg['n_bursts_base'] * intensity * (1 + np.log1p(F_burst))))
+        burst_size = max(5, int(cfg['burst_size_base'] * intensity * (1 + np.log1p(F_size))))
+
+
+        # --- 2026 OPTIMIZED BURST PHYSICS ---
+        nb_min  = opt_overrides.get(f"{scenario_type}_n_bursts_min", 2)
+        nb_base = opt_overrides.get(f"{scenario_type}_n_bursts_base_opt", cfg.get('n_bursts_base', 1))
+        nb_ladj = opt_overrides.get(f"{scenario_type}_n_bursts_log_adj", 1.0)
+        
+        bs_min  = opt_overrides.get(f"{scenario_type}_burst_size_min", 5)
+        bs_base = opt_overrides.get(f"{scenario_type}_burst_size_base_opt", cfg.get('burst_size_base', 6))
+        bs_ladj = opt_overrides.get(f"{scenario_type}_burst_size_log_adj", 1.0)
+        
+        n_bursts = max(nb_min, int(nb_base * intensity * (nb_ladj + np.log1p(F_burst))))
+        burst_size = max(bs_min, int(bs_base * intensity * (bs_ladj + np.log1p(F_size))))
+        
+                         
+        # Determine number of bursts and burst sizes
+        #n_bursts = max(2, int(cfg['n_bursts_base'] * intensity * F_burst))
+        #burst_size = max(5, int(cfg['burst_size_base'] * intensity * F_size))
+
+
+        # EMERGENCY BRAKE: Hard cap to ensure 2026 Simulation Stability
+        # Lower the Emergency Brake to 500 rows per anchor
+        if (n_bursts * burst_size) > 500:
+            burst_size = max(5, 500 // n_bursts)
+        
+        tx_cap  = opt_overrides.get(f"{scenario_type}_total_tx_cap", 500)
+        # Cap the simulation to prevent memory/performance explosion
+        if (n_bursts * burst_size) > tx_cap:
+            burst_size = max(bs_min, int(tx_cap // n_bursts))
+        
+        
+        total_transactions = n_bursts * burst_size
+
+        # --- REFINED LABELING LOGIC (HOLISTIC & BINARY) ---
+        if intensity > 1.8 or \
+           (total_transactions > 25 and network_centrality_score > 3.0) or \
+           (savings_drain_ratio > 0.85):
+            current_label = 1 # Suspicious Velocity Spike
+        else:
+            current_label = 0 # Explicitly set to 0 to prevent label leakage/undefined errors
+
+        # --- 2026 RECONCILED LABELING LOGIC ---
+        # Optuna finds the thresholds that best align 'Synthetic Reality' with 'Model Detection'
+        l_int_t   = opt_overrides.get(f"{scenario_type}_label_intensity_thresh", 1.8)
+        l_tx_t    = opt_overrides.get(f"{scenario_type}_label_tx_count_thresh", 25)
+        l_cent_t  = opt_overrides.get(f"{scenario_type}_label_centrality_thresh", 3.0)
+        l_drain_t = opt_overrides.get(f"{scenario_type}_label_drain_thresh", 0.85)
+
+        if intensity > l_int_t or \
+           (total_transactions > l_tx_t and network_centrality_score > l_cent_t) or \
+           (savings_drain_ratio > l_drain_t):
+            current_label = 1 
+        else:
+            current_label = 0
+        
+        
+        # --- EVT RETROFIT: GPD-Driven Extreme Value Sampling ---
+
+        # --- 2026 EVT & MONETARY CALIBRATION (Block 6) ---
+        
+        # 1. Resolve EVT Parameters from Overrides
+        v_thresh = opt_overrides.get(f"{scenario_type}_vs_threshold_pct", 95.0)
+        v_conf   = opt_overrides.get(f"{scenario_type}_vs_confidence_level", 0.99)
+        v_n      = int(opt_overrides.get(f"{scenario_type}_vs_sample_n", 5))
+        
+        
+        # Now our call inside def generate_events_from_params will run perfectly:
+        evt_payload = extreme_value_theory(
+            tx_window, 
+            scenario_type="velocity_spike",
+            #threshold_pct=trial.suggest_float("vs_threshold_pct", 90, 99),
+            #confidence_level=trial.suggest_float("vs_confidence_level", 0.99, 0.9999),
+            #sample_n=trial.suggest_int("vs_sample_n", 3, 15)
+            threshold_pct=v_thresh,
+            confidence_level=v_conf,
+            sample_n=v_n            
+        )
+        
+        # 1. Access the EVT Params from the pre-computed payload
+        spike_data = evt_payload["velocity_spike"]["high_tail_outliers"]
+        evt_params = spike_data["params"]
+
+        # BAYESIAN SUGGESTIONS: Calibrated for "Economic Drain" behavior
+        # High intensity velocity spikes typically move a high percentage of account value
+
+        # 1. Base Parameter Calculation (Standard Placement)
+        # F_amt represents your scaling factors like Income_f * PEP_f
+        mu_adj_base = cfg['amt_mu'] * F_amt * (1 + 0.05 * (intensity - 1))
+
+        # 2. Monetary Distribution Physics
+        # Tuning the hardcoded 0.05 intensity sensitivity
+        
+        # --- 2026 OPTIMIZED MONETARY BASES ---
+        # 1. Optimize the Config Defaults
+        mu_base    = opt_overrides.get(f"{scenario_type}_amt_mu_base_opt", cfg.get('amt_mu', 1100))
+
+        # 2. Optimize the Intensity Physics (Replacing the hardcoded 1 and -1)
+        mu_i_intercept = opt_overrides.get(f"{scenario_type}_mu_intensity_intercept", 1.0)
+        i_factor = opt_overrides.get(f"{scenario_type}_mu_adj_intensity_factor", 0.05)        
+        mu_i_offset    = opt_overrides.get(f"{scenario_type}_mu_intensity_offset", 1.0)
+        
+        mu_adj_base = mu_base * F_amt * (mu_i_intercept + i_factor * (intensity - mu_i_offset))
+        
+        
+        sigma_base = cfg['amt_sigma']
+        
+        sigma_base = opt_overrides.get(f"{scenario_type}_amt_sigma_base_opt", cfg.get('amt_sigma', 400))
+
+        
+        # 2. Bayesian Strategy for Velocity Spikes
+        # We use the same concepts from structuring but apply them to the Spike context
+        # mean_shift: pushes the 'burst' amounts higher (e.g., 1.1x to 1.3x)
+        # sigma_scale: tightens the burst (e.g., 0.4x to 0.7x) to show mechanical behavior
+        tuned_mu = mu_adj_base * trial.suggest_float("vs_spike_mean_shift", 1.05, 1.3)
+        tuned_sigma = sigma_base * trial.suggest_float("vs_spike_sigma_contraction", 0.3, 0.8)
+
+
+        # Tuning the Mean Shift and Sigma Contraction
+        m_shift = opt_overrides.get(f"{scenario_type}_vs_spike_mean_shift", 1.1)
+        s_cont  = opt_overrides.get(f"{scenario_type}_vs_spike_sigma_contraction", 0.5)
+
+        tuned_mu = mu_adj_base * m_shift
+        tuned_sigma = sigma_base * s_cont
+        
+        
+
+        # 3. Recalculate Bounds for Truncated Normal
+        # This ensures the spike stays within the global config limits [amt_min, amt_max]
+        lower_bound = cfg['amt_min']
+        upper_bound = cfg['amt_max']        
+
+        # 3. Boundary Optimization
+        lower_bound = opt_overrides.get(f"{scenario_type}_amt_min_opt", cfg['amt_min'])
+        upper_bound = opt_overrides.get(f"{scenario_type}_amt_max_opt", cfg['amt_max'])
+
+        # --- 2026 OPTIMIZED TEMPORAL PHYSICS (Block 7) ---
+        b_gap_scale = opt_overrides.get(f"{scenario_type}_burst_gap_scale", 3.0)
+
+        t_gap_scale = opt_overrides.get(f"{scenario_type}_tx_gap_scale", 15.0)
+        t_gap_mu    = opt_overrides.get(f"{scenario_type}_tx_gap_log_mu", 0.5)
+        t_gap_sigma = opt_overrides.get(f"{scenario_type}_tx_gap_log_sigma", 0.2)
+        
+        
+        # 4. Generate Spiky Transactions
+        for _ in range(n_bursts):
+            # Time between bursts compressed by F_inter
+            #t_burst_start = t_prev + timedelta(hours=float(np.random.exponential(scale=3.0 / F_inter)))
+            # Scale the 3-hour gap by BOTH the specific Inter-factor and the overall Intensity
+            t_burst_start = t_prev + timedelta(hours=float(np.random.exponential(scale=3.0 / (F_inter * intensity))))
+
+
+            t_burst_start = t_prev + timedelta(hours=float(np.random.exponential(scale=b_gap_scale / (F_inter * intensity))))
+
+            t_prev_tx = t_burst_start
+
+            # --- NEW CODE: Select channel for this burst based on config diversification prob
+            current_channel = np.random.choice(cfg['channel_config']['rails'])
+
+
+            for _ in range(burst_size):
+                # Time between tx within burst compressed by F_intra (True Velocity Spike)
+                #delta_min = float(np.random.exponential(scale=15.0 / F_intra) + np.random.lognormal(mean=0.5, sigma=0.2))
+
+                # The 15-minute gap is compressed most aggressively by the Intensity
+                delta_min = float(np.random.exponential(scale=15.0 / (F_intra * intensity)) + np.random.lognormal(mean=0.5, sigma=0.2))
+
+                # Time between tx: 15.0m anchor and lognormal params are now optimized
+                delta_min = float(np.random.exponential(scale=t_gap_scale / (F_intra * intensity)) + 
+                                  np.random.lognormal(mean=t_gap_mu, sigma=t_gap_sigma))                
+
+
+                
+                t_tx = t_prev_tx + timedelta(minutes=delta_min)
+
+                # Truncated Normal for authentic amount clustering
+                mu_adj = cfg['amt_mu'] * F_amt * (1 + 0.05 * (intensity - 1))
+                sigma = cfg['amt_sigma']
+                
+                a, b = (cfg['amt_min'] - mu_adj) / sigma, (cfg['amt_max'] - mu_adj) / sigma
+                amt = round(truncnorm.rvs(a, b, loc=mu_adj, scale=sigma), 2)
+
+
+                a, b = (lower_bound - mu_adj_base) / sigma_base, (upper_bound - mu_adj_base) / sigma_base
+                amt = round(truncnorm.rvs(a, b, loc=mu_adj_base, scale=sigma_base), 2)
+
+
+                
+                
+                # --- 2026 RETROFIT: EVT GATE FOR VELOCITY SPIKES ---
+
+                # --- 2026 RECONCILED EVT LOGIC (Block 7 Overrides) ---
+                # Using l_int_t and a new behavioral risk threshold (l_risk_t) from earlier blocks
+                l_int_t  = opt_overrides.get(f"{scenario_type}_label_intensity_thresh", 1.8)
+                l_risk_t = opt_overrides.get(f"{scenario_type}_compressed_risk_thresh", 5.0)
+
+                
+                # TRIGGER: Uses your 'compressed_total_risk' and 'intensity'
+                # Velocity EVT triggers when behavioral risk is high and the spike is active
+                #if evt_params["sigma_scale"] > 0 and (intensity > 1.8 or compressed_total_risk > 5.0):
+                
+                if evt_params["sigma_scale"] > 0 and (intensity > l_int_t or compressed_total_risk > l_risk_t):                    
+                    
+                    # SCALE: Tail spread is widened by Channel Hopping and Network Centrality
+                    # This simulates 'complex' laundering where amounts vary wildly across rails
+                    dynamic_sigma = evt_params["sigma_scale"] * (1 + (0.05 * channel_hop_score * network_centrality_score))
+
+                    # Optimize the 0.05 hop factor
+                    e_hop_f = opt_overrides.get(f"{scenario_type}_evt_sigma_hop_factor", 0.05)
+                    dynamic_sigma = evt_params["sigma_scale"] * (1 + (e_hop_f * channel_hop_score * network_centrality_score)
+
+                    
+                    # DEPTH: Deeper tails for higher Savings Drain (moving larger chunks of wealth)
+                    tail_depth = min(0.995, 0.2 + (savings_drain_ratio / 2.0))
+
+                    # Optimize the tail depth physics (0.995, 0.2, 2.0)
+
+                    e_tail_ceil  = opt_overrides.get(f"{scenario_type}_evt_tail_ceiling", 0.995)                               
+                    e_tail_floor = opt_overrides.get(f"{scenario_type}_evt_tail_floor", 0.2)
+                    e_tail_drain = opt_overrides.get(f"{scenario_type}_evt_tail_drain_factor", 2.0)
+
+                    tail_depth = min(e_tail_ceil, e_tail_floor + (savings_drain_ratio / e_tail_drain))                                 
+                               
+                    u_sample = np.random.uniform(0.5, tail_depth)
+                    
+                    # EVT Exceedance
+                    exceedance = genpareto.ppf(u_sample, evt_params["xi_shape"], loc=0, scale=dynamic_sigma)
+                    #amt = round(min(upper_bound, evt_params["threshold_u"] + exceedance), 2)
+                    amt = round(evt_params["threshold_u"] + exceedance, 2)
+
+                
+                else:
+                    # FALLBACK: Bayesian Baseline
+                    # Higher 'mean_translation' pushes the burst volume up, 
+                    # while 'sigma_contraction' makes it look like repetitive automated spikes
+
+                    # 1. Resolve Safety Floor (Optimizing the 0.01)
+                    s_floor = opt_overrides.get(f"{scenario_type}_sigma_min_floor", 0.01)
+                        
+                    a_spike = (lower_bound - tuned_mu) / max(0.01, tuned_sigma)
+                    b_spike = (upper_bound - tuned_mu) / max(0.01, tuned_sigma)
+
+                    a_spike = (lower_bound - tuned_mu) / max(s_floor, tuned_sigma)
+                    b_spike = (upper_bound - tuned_mu) / max(s_floor, tuned_sigma)
+                            
+                    # 4. Generate "Professionalized" Spike Amount
+                    # This avoids the "clipping" artifacts and creates a realistic 'tight' cluster of high-value trades
+                    amt = round(truncnorm.rvs(a_spike, b_spike, loc=tuned_mu, scale=tuned_sigma), 2)                    
+                
+                ##tx_type = random.choices(
+                    ##["DEBIT", "CREDIT", "P2P"],
+                    ##weights=[0.7 * F_type_debit, 0.2 * F_type_credit, 0.1 * F_type_p2p]
+                ##)[0]
+
+
+                #tx_type = random.choices(
+                    #["DEBIT", "CREDIT"],
+                    #weights=[0.7 * F_type_debit, 0.3 * F_type_credit]
+                #)[0]
+
+
+                # ---------------------------------------------------------
+                # SUPERSEDING RULE: Rail-Hopping logic for 2026 AML 
+                # ---------------------------------------------------------
+                chan = cfg['channel_config']
+
+                # CHANGE THIS LINE:
+                # is_rail_hop = np.random.random() < chan['hop_diversification_prob']
+                
+                # TO THIS (Matches your JSON key 'diversification_prob'):
+                is_rail_hop = np.random.random() < chan['diversification_prob']
+                            
+                d_prob = opt_overrides.get(f"{scenario_type}_diversification_prob_opt", chan.get('diversification_prob', 0.65))
+                is_rail_hop = np.random.random() < d_prob
+
+                
+                if is_rail_hop:
+                    # High-intensity signal: Pick a high-risk rail
+                    tx_type = np.random.choice(chan['rails'])
+                else:
+                    # Status quo: standard fiat directionality
+                    tx_type = np.random.choice(["CREDIT", "DEBIT"], p=[0.5, 0.5])
+
+                    # Optimized Baseline Weights (Block 8)
+                    p_credit = opt_overrides.get(f"{scenario_type}_tx_type_credit_p", 0.5)
+                    p_debit  = opt_overrides.get(f"{scenario_type}_tx_type_debit_p", 0.5)
+                    p_sum = p_credit + p_debit
+                    tx_type = np.random.choice(["CREDIT", "DEBIT"], p=[p_credit/p_sum, p_debit/p_sum])
+                
+                #rows.append(_assemble_tx(acct, party_key, t_tx, amt, tx_type, cfg))
+                #rows.append(_assemble_tx(acct, party_key, ref_date, t_tx, amt, tx_type, cfg, label=current_label))
+
+                # We need to pass the channel information into the final transaction object
+                # Assuming _assemble_tx can handle an extra 'channel' parameter
+                rows.append(_assemble_tx(acct, party_key, ref_date, t_tx, amt, tx_type, cfg, label=current_label))
+
+                t_prev_tx = t_tx
+    
+            # Micro-transactions after burst
+            #rows.extend(_generate_micro_tx(t_prev_tx, amt, cfg))
+            
+            # Micro-transactions now scale with F_micro from the new JSON location
+            #F_micro_val = (dw["F_micro"]["PEP"] if is_pep else 1.0) * (1 + risk_score * dw["F_micro"]["risk_score"])
+
+
+            # --- 2026 CORRECTION: PROTECTED MICRO-TX SCALING ---
+            # We scale the COUNT of micro-tx with risk, but CAP the amount 
+            # to ensure they remain 'micro' (under $150) and don't distort precision.
+            F_micro_val = (dw["F_micro"]["PEP"] if is_pep else 1.0) * (1 + risk_score * dw["F_micro"]["risk_score"])
+
+            # --- 2026 OPTIMIZED MICRO-TRANSACTION LOGIC (Block 9) ---
+            
+            # 1. Resolve Multipliers and Neutrals
+            #f_mic_pep   = opt_overrides.get(f"{scenario_type}_F_micro_PEP", dw["F_micro"].get("PEP", 0.5))
+            #f_mic_pep_n = opt_overrides.get(f"{scenario_type}_F_micro_PEP_neutral", 1.0)
+            #f_mic_rss   = opt_overrides.get(f"{scenario_type}_F_micro_risk_scale", dw["F_micro"].get("risk_score", 0.3))
+    
+            #F_micro_val = (f_mic_pep if is_pep else f_mic_pep_n) * (1 + risk_score * f_mic_rss)
+
+                        
+            # Use a conservative fraction (e.g. 5%) of the main amt, but never exceeding a realistic noise ceiling
+            micro_amt_base = min(amt * 0.05 * F_micro_val, 150.0)
+
+            # 2. Amount and Noise Logic (Replacing 0.05 and 150.0)
+            #m_fraction = opt_overrides.get(f"{scenario_type}_micro_amt_fraction", 0.05)
+            #m_ceiling  = opt_overrides.get(f"{scenario_type}_micro_noise_ceiling", 150.0)
+            #micro_amt_base = min(amt * m_fraction * F_micro_val, m_ceiling)
+                        
+            # Ensure n_micro also reflects the burst intensity
+            n_micro_burst = max(1, int(2 * intensity * F_micro_val))
+
+            # 3. Frequency and Jitter (Replacing 2, 0.7, and 1.2)
+            #m_n_base = opt_overrides.get(f"{scenario_type}_micro_n_base", 2.0)
+            #n_micro_burst = max(1, int(m_n_base * intensity * F_micro_val))
+
+            #m_jit_min = opt_overrides.get(f"{scenario_type}_micro_jitter_min", 0.7)
+            #m_jit_max = opt_overrides.get(f"{scenario_type}_micro_jitter_max", 1.2)
+
+                             
+            for _ in range(n_micro_burst):
+                # Jitter the micro-amount so they aren't all identical
+                micro_amt = round(micro_amt_base * np.random.uniform(0.7, 1.2), 2)
+
+                #micro_amt = round(micro_amt_base * np.random.uniform(m_jit_min, m_jit_max), 2)
+                #rows.extend(_generate_micro_tx(t_prev_tx, micro_amt, config=cfg, ref_date=ref_date, label=current_label, channel=current_channel))
+
+            
+            ###rows.extend(_generate_micro_tx(t_prev_tx, amt * F_micro_val, config, ref_date=ref_date, label=current_label))
+            ###rows.extend(_generate_micro_tx(t_prev_tx, amt * F_micro_val, config=cfg, ref_date=ref_date, label=current_label))
+
+            ###rows.extend(_generate_micro_tx(t_prev_tx, amt * F_micro_val, config=cfg, ref_date=ref_date, label=current_label, channel=current_channel))
+            
+            t_prev = t_prev_tx
+
+    
+    
