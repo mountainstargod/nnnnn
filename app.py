@@ -5234,3 +5234,614 @@ def generate_events_from_params(acct, ref_date, anchor, intensity, params, party
         # -----------------------------------------------
         #rows.extend(_generate_micro_tx(t_prev, amt, cfg, ref_date=ref_date, label=current_label))
 
+        
+    elif scenario_type == "biz_flag_pep_indonesia":
+        # -----------------------------------------------
+        # FETCH SCENARIO CONFIG
+        # -----------------------------------------------
+        cfg = scenario_config['biz_flag_pep_indonesia']
+        sampling_cfg = cfg['demographic_sampling']
+        micro_cfg = cfg['micro_params']
+        multipliers = cfg['demographic_factors']
+
+        # --- 0. EXTRACT 2026 3D PARAMETERS ---
+        topo, chan, econ = cfg['network_topology'], cfg['channel_config'], cfg['economic_sensibility']
+
+        # Helper function to handle flattened dictionary from Bayesian Optimization
+        def get_factor(source, actor_val):
+            # If it's the expected dict, do a lookup
+            if isinstance(source, dict):
+                return source.get(str(actor_val), 1.0)
+            # If it's a flattened number (like your debug showed), use it directly
+            if isinstance(source, (int, float)):
+                return float(source)
+            return 1.0
+            
+        
+        # -----------------------------------------------
+        # 1. SYNTHETIC DEMOGRAPHICS
+        # -----------------------------------------------
+        actor = {
+            "age": np.random.uniform(*sampling_cfg['age_range']),
+            "gender": np.random.choice(sampling_cfg['gender']['choices'],
+                                       p=sampling_cfg['gender']['probabilities']),
+            "role": np.random.choice(sampling_cfg['role']['choices'],
+                                     p=sampling_cfg['role']['probabilities']),
+            "tenure": np.random.uniform(*sampling_cfg['tenure_range']),
+            "nationality": "Indonesia",
+            "entity_type": np.random.choice(sampling_cfg['entity_type']['choices'],
+                                            p=sampling_cfg['entity_type']['probabilities'])
+        }
+
+
+        
+        # Mandatory Dual-Prefix Handshake
+        pfx = f"{scenario_type}_"
+
+        def dynamic_sample(field_name):
+            """
+            Optimized index-based sampler for categorical fields.
+            """
+            prob_key = f"{pfx}dist_{field_name}" # Matches Block 0 "dist_" prefix
+            default_probs = sampling_cfg.get(field_name, {}).get('probabilities', [])
+            
+            # Retrieve the Bayesian-warped distribution from Upstream
+            p_vector = opt_overrides.get(prob_key, default_probs)
+            
+            # Returns integer index (0, 1, 2...)
+            return np.random.choice(len(p_vector), p=p_vector)
+
+        # --- 1. SYNTHETIC DEMOGRAPHICS (OPTIMIZED) ---
+        actor = {
+            # Optimized age range bounds
+            "age": np.random.uniform(
+                opt_overrides.get(f"{pfx}age_min", sampling_cfg['age_range'][0]),
+                opt_overrides.get(f"{pfx}age_max", sampling_cfg['age_range'][1])
+            ),
+            # Optimized uniform tenure range bounds
+            "tenure": np.random.uniform(
+                opt_overrides.get(f"{pfx}tenure_min", sampling_cfg['tenure_range'][0]),
+                opt_overrides.get(f"{pfx}tenure_max", sampling_cfg['tenure_range'][1])
+            ),
+
+            # Optimized categorical distributions (Returns numeric index)
+            "gender": dynamic_sample("gender"),
+            "role": dynamic_sample("role"),
+            "entity_type": dynamic_sample("entity_type"),
+
+            # Static values for this specific typology
+            "nationality": "Indonesia"
+        }
+
+        # --- 2. VARIABLE EXTRACTION (HANDSHAKE READY) ---
+        # Extracting indices and scalars for downstream multipliers and risk logic
+        age = actor['age']
+        gender = actor['gender']
+        role = actor['role']
+        tenure = actor['tenure']
+        entity_type = actor['entity_type']
+        
+        
+        # 1. 3D RISK MODIFIER (Retrofit)
+        # Consolidates Centrality (Topo), Rail Switch Intensity (Diversity), and Tenure Decay (Economic)
+        total_risk_mod = max(1e-6,        
+                         (topo['node_centrality_boost'] if actor['role'] == "Advisor" else 1.0) * \
+                         (chan['rail_switch_intensity'] / 2.0) * \
+                         (1.0 + (1.0 - econ['tenure_decay_factor']) if actor['tenure'] < 3 else 1.0)
+        )
+
+
+
+        # --- 1. ACTIVE MULTIPLIER LOOKUPS ---
+        # Map categorical demographics to BO-tunable factors
+        role_f    = get_factor(multipliers.get('role'), actor['role'])
+        entity_f  = get_factor(multipliers.get('entity_type'), actor['entity_type'])
+        gender_f  = get_factor(multipliers.get('gender'), actor['gender'])
+        
+        # Tenure-based scaling: In 2026, shorter tenure in high-profile roles 
+        # is a red flag for "Shell Appointment" risk.
+        tenure_base = multipliers.get('tenure_weight', 1.0)
+        tenure_f = tenure_base * (1.5 if actor['tenure'] < 3 else 1.0)
+
+        # Create the Static Demographic Foundation (D_Risk)
+        # We include gender and age if the BO finds they correlate with higher risk profiles
+        D_Risk = (role_f * entity_f * gender_f * tenure_f)
+
+
+        # --- 1. RECONCILED MULTIPLIER LOOKUPS (OPTIMIZED) ---
+        # Optuna finds the 'Separability Gap' by tuning these weights
+        role_f    = opt_overrides.get(f"{pfx}role_f", 
+                                      get_factor(multipliers.get('role'), actor['role']))
+        
+        entity_f  = opt_overrides.get(f"{pfx}entity_f", 
+                                      get_factor(multipliers.get('entity_type'), actor['entity_type']))
+        
+        gender_f  = opt_overrides.get(f"{pfx}gender_f", 
+                                      get_factor(multipliers.get('gender'), actor['gender']))
+        
+        # --- 2. OPTIMIZED TENURE PHYSICS (SHELL APPOINTMENT RISK) ---
+        # Replacing 1.0, 1.5, and 3 with optimized scalars
+        t_base_f    = opt_overrides.get(f"{pfx}tenure_weight_f", multipliers.get('tenure_weight', 1.0))
+        t_penalty_f = opt_overrides.get(f"{pfx}tenure_penalty_f", 1.5)
+        t_thresh    = opt_overrides.get(f"{pfx}tenure_threshold", 3.0)
+        
+        # Binary logic with optimized penalty and threshold
+        tenure_f = t_base_f * (t_penalty_f if actor['tenure'] < t_thresh else 1.0)
+
+        # Create the Static Demographic Foundation (D_Risk)
+        # Optimized D_Risk acts as the 'Profile Strength' anchor for the PEP typology
+        D_Risk = (role_f * entity_f * gender_f * tenure_f)
+        
+        
+
+        # --- 2. THE 2026 TOTAL BEHAVIORAL RISK BRIDGE ---
+        # 1e-6 Safeguard prevents mathematical failure during BO trials
+        Total_Behavioral_Risk = max(1e-6, (
+            D_Risk * 
+            (topo['node_centrality_boost'] if actor['role'] == "Advisor" else 1.0) * 
+            (chan['rail_switch_intensity'] / 2.0) * 
+            (1.0 + (1.0 - econ['tenure_decay_factor']) if actor['tenure'] < 3 else 1.0)
+        ))
+        
+        
+
+        # --- 2. THE 2026 TOTAL BEHAVIORAL RISK BRIDGE (OPTIMIZED) ---
+        
+        # A. Topological Boost (Targeting 'Advisor' Role - Numeric Index Standard)
+        # We check for both the string "Advisor" and the numeric index (e.g., 2)
+        n_boost = opt_overrides.get(f"{pfx}node_centrality_f", topo.get('node_centrality_boost', 1.0))
+        n_base  = opt_overrides.get(f"{pfx}node_base_f", 1.0)
+        
+        # B. Channel Intensity (Optimized numerator and divisor)
+        r_int = opt_overrides.get(f"{pfx}rail_intensity_f", chan.get('rail_switch_intensity', 1.0))
+        r_div = opt_overrides.get(f"{pfx}rail_divisor", 2.0)
+        
+        # C. Tenure-Based Economic Risk (Zero-Hardcoding)
+        t_decay_f   = opt_overrides.get(f"{pfx}tenure_decay_f", econ.get('tenure_decay_factor', 0.5))
+        t_risk_thr  = opt_overrides.get(f"{pfx}tenure_risk_threshold", 3.0)
+        t_risk_base = opt_overrides.get(f"{pfx}tenure_risk_base_f", 1.0)
+
+        # Execution with full Optuna governance
+        Total_Behavioral_Risk = max(1e-6, (
+            D_Risk * 
+            (n_boost if actor['role'] == "Advisor" or actor['role'] == 2 else n_base) * 
+            (r_int / r_div) * 
+            (t_risk_base + (t_risk_base - t_decay_f) if actor['tenure'] < t_risk_thr else 1.0)
+        ))
+
+
+        
+        # -----------------------------------------------
+        # 3. ACTIVE MULTIPLIER LOOKUPS (RE-ENABLED)
+        # -----------------------------------------------
+        # Direct dictionary access allows for substantial multiplier sizes
+        RoleFactor       = multipliers['role'].get(actor['role'], 1.0)
+        EntityTypeFactor = multipliers['entity_type'].get(actor['entity_type'], 1.0)
+        TenureFactor     = 1.0 + (actor['tenure'] * multipliers['tenure_weight'])
+        
+        # 2. INTENSITY CALCULATION
+        # Restore the anomaly gate to protect the 'Normal' baseline
+        if np.random.random() < 0.30:
+            intensity = np.random.lognormal(mean=0.8, sigma=0.4) * total_risk_mod
+            intensity = np.clip(intensity, 2.5, 6.0) # Keep the clip to ensure visibility
+        else:
+            intensity = np.random.uniform(0.9, 1.2)
+
+
+
+
+
+        
+        # 1. 2026 Intent Logic: Normal vs. Anomaly Mode
+        is_suspicious_burst = np.random.random() < 0.30
+
+        # 2. Dynamic Intensity Calculation
+        if is_suspicious_burst:
+            # Suspicious Mode: Scale by the holistic Risk Bridge
+            # Lognormal captures the 'flash-siphoning' nature of PEP bursts
+            base_intensity = np.random.lognormal(mean=0.8, sigma=0.4)
+            intensity = base_intensity * Total_Behavioral_Risk
+        else:
+            # Baseline Mode: Even 'normal' PEP activity is risk-proportional in 2026
+            # This ensures High-Risk Advisors naturally act faster than Low-Risk individuals
+            intensity = np.random.uniform(0.9, 1.2) * (Total_Behavioral_Risk * 0.5)
+
+        # 3. DYNAMIC SAFEGUARDS (Replacing the hard np.clip)
+        # We allow BO to tune the intensity envelope to find the 'Phase Transition'
+        int_floor = trial.suggest_float("pep_int_floor", 0.1, 1.5)
+        int_ceiling = trial.suggest_float("pep_int_ceiling", 5.0, 15.0)
+
+        intensity = max(int_floor, min(int_ceiling, round(intensity, 2)))
+
+
+
+
+        # --- 1. OPTIMIZED INTENT LOGIC (Suspicious Burst) ---
+        s_burst_prob = opt_overrides.get(f"{pfx}suspicious_burst_prob", 0.30)
+        is_suspicious_burst = np.random.random() < s_burst_prob
+
+        # --- 2. DYNAMIC INTENSITY CALCULATION ---
+        if is_suspicious_burst:
+            # Suspicious Mode: 'Flash-Siphoning' (Heavy-tailed)
+            m_mean  = opt_overrides.get(f"{pfx}msb_log_mean", 0.8)
+            m_sigma = opt_overrides.get(f"{pfx}msb_log_sigma", 0.4)
+            
+            base_intensity = np.random.lognormal(mean=m_mean, sigma=m_sigma)
+            intensity = base_intensity * Total_Behavioral_Risk
+        else:
+            # Baseline Mode: Proportional to optimized Risk Bridge
+            n_low   = opt_overrides.get(f"{pfx}norm_uni_low", 0.9)
+            n_high  = opt_overrides.get(f"{pfx}norm_uni_high", 1.2)
+            r_scale = opt_overrides.get(f"{pfx}norm_risk_scale", 0.5)
+            
+            intensity = np.random.uniform(n_low, n_high) * (Total_Behavioral_Risk * r_scale)
+
+        # --- 3. DYNAMIC SAFEGUARDS (RECONCILED) ---
+        # Replacing 'pep_int_floor' and 'pep_int_ceiling' suggest calls
+        i_floor = opt_overrides.get(f"{pfx}int_floor", 0.1)
+        i_ceiling = opt_overrides.get(f"{pfx}int_ceiling", 15.0)
+
+        intensity = max(i_floor, min(i_ceiling, round(intensity, 2)))        
+
+
+
+        
+        
+        # 3. REFINED LABELING LOGIC (3D Aware)
+        # Labeling threshold (2.2) is dynamically lowered by the structural total_risk_mod
+        if (intensity > (2.2 / total_risk_mod)) or (RoleFactor > 1.5 and intensity > 1.5) or \
+           (actor['tenure'] < 1.0 and intensity > 2.0) or (topo['shell_company_depth'] > 1):
+            current_label = 1
+        else:
+            current_label = 0
+            
+
+
+
+        
+        # --- 1. DYNAMIC DETECTION THRESHOLD ---
+        # Instead of dividing (unstable), we use the UBR to lower the barrier linearly.
+        # High-risk proxies (Advisors) trigger alerts at lower intensities (e.g., 1.1)
+        # while legitimate PEP activity requires a much higher burst (e.g., 2.5)
+        detection_threshold = max(1.1, 2.5 - (Total_Behavioral_Risk * 0.15))
+
+        # --- 2. MULTI-PRONGED DETECTION TRIGGERS ---
+        
+        # Trigger A: Profile-Adjusted Velocity
+        is_velocity_trigger = (intensity > detection_threshold)
+
+        # Trigger B: Tenure-Role Mismatch (2026 Proxy Signature)
+        # High RoleFactor (Advisors/Family) + Short Tenure + Moderate Intensity
+        is_proxy_anomaly = (Role_f > 1.4 and actor['tenure'] < 2.0 and intensity > 1.3)
+
+        # Trigger C: Structural Obfuscation (The 'Shell' DNA)
+        # In 2026, PEPs hide behind layers. Shell depth and Rail Switching are prima facie leads.
+        is_obfuscation_trigger = (topo.get('shell_company_depth', 0) > 1) or \
+                                 (chan.get('rail_switch_intensity', 0) > 3.0)
+
+        # --- 3. FINAL LABEL ASSIGNMENT ---
+        if is_velocity_trigger or is_proxy_anomaly or is_obfuscation_trigger:
+            current_label = 1
+        else:
+            current_label = 0
+
+
+
+
+
+        # --- 1. DYNAMIC DETECTION THRESHOLD (FULLY OPTIMIZED) ---
+        # Replacing 1.1, 2.5, and 0.15 with optimized scalars
+        d_floor = opt_overrides.get(f"{pfx}det_floor", 1.1)
+        d_int   = opt_overrides.get(f"{pfx}det_intercept", 2.5)
+        d_slope = opt_overrides.get(f"{pfx}det_slope", 0.15)
+        
+        detection_threshold = max(d_floor, d_int - (Total_Behavioral_Risk * d_slope))
+
+        # --- 2. MULTI-PRONGED DETECTION TRIGGERS ---
+        
+        # Trigger A: Profile-Adjusted Velocity
+        is_velocity_trigger = (intensity > detection_threshold)
+
+        # Trigger B: Tenure-Role Mismatch (Proxy Signature)
+        # Using role_f from Block 1 and optimized limits
+        r_trig   = opt_overrides.get(f"{pfx}proxy_role_limit", 1.4)
+        t_trig   = opt_overrides.get(f"{pfx}proxy_tenure_limit", 2.0)
+        int_trig = opt_overrides.get(f"{pfx}proxy_int_limit", 1.3)
+        
+        is_proxy_anomaly = (role_f > r_trig and actor['tenure'] < t_trig and intensity > int_trig)
+
+        # Trigger C: Structural Obfuscation (Shell DNA)
+        # Straightforward Handshake for topological features
+        shell_val = opt_overrides.get(f"{pfx}shell_depth_f", topo.get('shell_company_depth', 0))
+        shell_lim = opt_overrides.get(f"{pfx}shell_depth_limit", 1)
+
+        rail_val  = opt_overrides.get(f"{pfx}rail_switch_f", chan.get('rail_switch_intensity', 0))
+        rail_lim  = opt_overrides.get(f"{pfx}rail_switch_limit", 3.0)
+        
+        is_obfuscation_trigger = (shell_val > shell_lim) or (rail_val > rail_lim)
+
+
+        # --- 3. FINAL LABEL ASSIGNMENT ---
+        if is_velocity_trigger or is_proxy_anomaly or is_obfuscation_trigger:
+            current_label = 1
+        else:
+            current_label = 0
+        
+
+
+        
+        # Economic Sensibility: Wealth to Velocity Cap bound by staged escalation
+        #n_tx = max(3, int(cfg['n_tx_base'] * intensity * RoleFactor * EntityTypeFactor * TenureFactor))
+        #n_tx = min(n_tx, int(cfg['n_tx_base'] * econ['wealth_to_velocity_cap']))
+
+
+        # 1. Calculate the 'Desired' transaction count
+        desired_n_tx = int(cfg['n_tx_base'] * intensity * RoleFactor * EntityTypeFactor * TenureFactor)
+
+        # --- 1. OPTIMIZED TRANSACTION VOLUME (ZERO LEGACY) ---
+        # Replaces cfg['n_tx_base']
+        n_base = opt_overrides.get(f"{pfx}n_tx_base_opt", cfg.get('n_tx_base', 10))
+        v_scale = opt_overrides.get(f"{pfx}vol_intensity_scale", 1.0)
+        
+        # We reuse the optimized factors from Block 1 (role_f, entity_f, tenure_f)
+        # instead of the legacy RoleFactor, EntityTypeFactor, etc.
+        desired_n_tx = int(n_base * intensity * role_f * entity_f * tenure_f * v_scale)
+
+        
+        # 2. Calculate the 'Economic Profile' limit
+        economic_limit = int(cfg['n_tx_base'] * econ['wealth_to_velocity_cap'])
+
+        # --- 2. OPTIMIZED ECONOMIC LIMIT ---
+        # Reuses the optimized n_base and adds a dynamic cap
+        w_v_cap = opt_overrides.get(f"{pfx}wealth_velocity_cap_f", econ.get('wealth_to_velocity_cap', 5.0))
+        economic_limit = int(n_base * w_v_cap)
+        
+        # 3. Apply a Soft Ceiling (Integrated Logic)
+        if current_label:
+            # Suspicious actors break the cap slightly (e.g., 20% over-drift allowed)
+            n_tx = max(3, min(desired_n_tx, int(economic_limit * 1.2)))
+        else:
+            # Normal actors are strictly bound by the cap
+            n_tx = max(3, min(desired_n_tx, economic_limit))
+
+        
+        # --- 3. OPTIMIZED SOFT CEILING (ZERO HARDCODING) ---
+        n_floor = opt_overrides.get(f"{pfx}n_tx_floor_opt", 3)
+        drift_f = opt_overrides.get(f"{pfx}suspicious_drift_f", 1.2)
+
+        if current_label:
+            # Suspicious actors: drift factor allows exceeding the cap
+            n_tx = max(int(n_floor), min(desired_n_tx, int(economic_limit * drift_f)))
+        else:
+            # Normal actors: strictly bound by the economic limit
+            n_tx = max(int(n_floor), min(desired_n_tx, economic_limit))
+
+        
+        t_prev = anchor
+        pep_pool = cfg['pep_pool']
+
+        # Now our call inside def generate_events_from_params will run perfectly:
+        evt_payload = extreme_value_theory(
+            tx_window, 
+            scenario_type="biz_flag_pep_indonesia",
+            #threshold_pct=trial.suggest_float("bpi_threshold_pct", 90, 99),
+            #confidence_level=trial.suggest_float("bpi_confidence_level", 0.99, 0.9999),
+            #sample_n=trial.suggest_int("bpi_sample_n", 3, 15)
+
+            threshold_pct=opt_overrides.get(f"{pfx}evt_threshold_pct", 95.0),
+            confidence_level=opt_overrides.get(f"{pfx}evt_confidence", 0.995),
+            sample_n=int(opt_overrides.get(f"{pfx}evt_sample_n", 10))            
+            
+        )
+
+        # 1. Access the EVT Params from the pre-computed payload
+        pep_data = evt_payload["biz_flag_pep_indonesia"]["high_tail_outliers"]
+        evt_params = pep_data["params"]
+
+        # BAYESIAN SUGGESTIONS: Defined once to ensure entity consistency
+        # pep_mean_shift: pushes the 'retainer' amount higher (e.g., 1.1x to 1.4x)
+        # pep_sigma_scale: tightens the spread (e.g., 0.2x to 0.5x) for mechanical behavior
+        pep_m_shift = trial.suggest_float("bpi_pep_mean_shift", 1.05, 1.4)
+        pep_s_scale = trial.suggest_float("bpi_pep_sigma_scale", 0.1, 0.5)
+
+        # --- 2. BAYESIAN STRATEGY: 'Mechanical Retainers' ---
+        # Maps optimized strategy parameters to local pep variables
+        pep_m_shift = opt_overrides.get(f"{pfx}str_mean_shift", 1.2)
+        pep_s_scale = opt_overrides.get(f"{pfx}str_sigma_scale", 0.3)
+        
+
+        # 2. Global System Bounds (Standardized per your recap)
+        lower_bound = cfg['amt_min']
+        upper_bound = cfg['amt_max']
+        
+        # 3. Global System Bounds (Optimized)
+        # Replacing cfg['amt_min'] and cfg['amt_max']
+        lower_bound = opt_overrides.get(f"{pfx}amt_min_opt", cfg.get('amt_min', 10.0))
+        upper_bound = opt_overrides.get(f"{pfx}amt_max_opt", cfg.get('amt_max', 10000.0))
+
+        # --- 1. RECONCILED LOOP SETUP ---
+        esc_fact = opt_overrides.get(f"{pfx}escalation_f", econ.get('staged_escalation_factor', 1.1))
+        retent_f = opt_overrides.get(f"{pfx}retention_f", econ.get('balance_retention_ratio', 0.1))
+
+        
+        for i in range(n_tx):
+            # Economic Sensibility: Staged Escalation and Balance Retention (Mule Fee)
+            escalation = (econ['staged_escalation_factor'] ** (i/n_tx)) if current_label else 1.0
+
+            # Staged Escalation: Suspicious actors build momentum
+            escalation = (esc_fact ** (i/n_tx)) if current_label else 1.0
+            
+            matrix_key = f"{actor['role']}_{actor['entity_type']}"
+            amt_range = cfg['amount_matrix'].get(matrix_key, cfg['amount_matrix']['Default'])
+
+
+            # Numeric Index Mapping: role and entity_type are indices from Block 0
+            # We map them back to strings for the amount_matrix lookup if necessary
+            role_label = sampling_cfg['role']['choices'][actor['role']]
+            entity_label = sampling_cfg['entity_type']['choices'][actor['entity_type']]
+            matrix_key = f"{role_label}_{entity_label}"
+            amt_range = cfg['amount_matrix'].get(matrix_key, cfg['amount_matrix']['Default'])
+            
+
+            
+            #amt = round(np.random.uniform(amt_range[0], amt_range[1]) * intensity * escalation * (1 - econ['balance_retention_ratio']), 2)
+
+            base_flow = np.random.uniform(amt_range[0], amt_range[1]) * intensity * escalation * (1 - econ['balance_retention_ratio'])
+
+            base_flow = np.random.uniform(amt_range[0], amt_range[1]) * intensity * escalation * (1 - retent_f)
+            
+            # --- 2026 HYBRID AMOUNT LOGIC ---
+            # Trigger EVT for Ministers, Advisors, or any high-intensity activity
+            # Minister and Advisor are both > 1.5 in oour RoleFactor config
+            # 2026 Refined Trigger using the RoleFactor you defined in Part 1:
+            
+            #if evt_params["sigma_scale"] > 0 and (intensity > 2.8 or RoleFactor >= 1.8):
+
+            # Replaces hardcoded 2.8 and 1.8
+            if evt_params["sigma_scale"] > 0 and (intensity > detection_threshold or role_f >= r_trig):
+                
+                # This now captures BOTH Ministers (2.5) and Advisors (1.8)
+                # while leaving Intermediaries (1.2) to the 'Else' branch unless intensity is extreme.
+              
+                #dynamic_sigma = evt_params["sigma_scale"] * (1 + (0.15 * total_risk_mod)) 
+                dynamic_sigma = evt_params["sigma_scale"] * (1 + (0.15 * Total_Behavioral_Risk))
+
+                s_base  = opt_overrides.get(f"{pfx}evt_sigma_base", 1.0)
+                r_adj   = opt_overrides.get(f"{pfx}evt_risk_adj", 0.15)
+                dynamic_sigma = evt_params["sigma_scale"] * (s_base + (r_adj * Total_Behavioral_Risk))
+
+                
+                tail_depth = min(0.999, 0.5 + (intensity / 15.0))
+
+                t_bas   = opt_overrides.get(f"{pfx}evt_tail_base", 0.5)
+                i_div   = opt_overrides.get(f"{pfx}evt_int_div", 15.0)
+                tail_depth = min(0.999, t_bas + (intensity / i_div))
+                
+                u_sample = np.random.uniform(0.6, tail_depth)
+
+                u_flr   = opt_overrides.get(f"{pfx}evt_uni_floor", 0.6)
+                u_sample = np.random.uniform(u_flr, tail_depth)
+                
+                exceedance = genpareto.ppf(u_sample, evt_params["xi_shape"], loc=0, scale=dynamic_sigma)
+                # Ministers can pierce bounds significantly (Bribery/Scandal simulation)
+                #amt = round(min(upper_bound * 5, base_flow + exceedance), 2)
+                amt = round( base_flow + exceedance, 2)
+        
+            else:
+                # Bayesian Retainer signature: high consistency, low variance
+                tuned_mu = base_flow * pep_m_shift
+                tuned_sigma = (base_flow * 0.05) * pep_s_scale
+
+                
+                # --- 3. OPTIMIZED TRUNCATED NORMAL (Bayesian Retainer) ---
+                v_contract = opt_overrides.get(f"{pfx}var_contract_f", 0.05)
+                tuned_sigma = (base_flow * v_contract) * pep_s_scale
+                
+                a_pep = (lower_bound - tuned_mu) / max(0.01, tuned_sigma)
+                b_pep = (upper_bound - tuned_mu) / max(0.01, tuned_sigma)
+                amt = round(truncnorm.rvs(a_pep, b_pep, loc=tuned_mu, scale=tuned_sigma), 2)
+
+            
+            # Channel Diversity: Rail Hopping (BI-FAST, mBridge)
+            is_rail_hop = np.random.random() < chan['hop_diversification_prob']
+
+            # --- 4. CHANNEL DIVERSITY ---
+            hop_p = opt_overrides.get(f"{pfx}hop_prob_f", chan.get('hop_diversification_prob', 0.1))
+            is_rail_hop = np.random.random() < hop_p
+
+            
+            tx_type = np.random.choice(chan['rails']) if is_rail_hop else "CREDIT"
+
+            rows.append(
+                _assemble_tx(
+                    acct, party_key, ref_date, t_prev, amt, tx_type, cfg,
+                    label=current_label,
+                    pools={"country_pool_primary": pep_pool, "demographics": actor}
+                )
+            )
+
+            # 3D Velocity: Latency bypass for BI-FAST + Topology coordination (mule_cluster_density)
+            v_bypass = chan['latency_bypass_multiplier'] if is_rail_hop else 1.0
+
+            # --- OPTIMIZED VELOCITY PHYSICS (BI-FAST / mBridge Aware) ---
+            v_bypass_mult = opt_overrides.get(f"{pfx}latency_bypass_f", chan.get('latency_bypass_multiplier', 1.0))
+            v_bypass = v_bypass_mult if is_rail_hop else 1.0
+
+            
+            h_min, h_max = cfg['role_time_window'].get(actor['role'], (1, 4))
+            
+            # High mule_cluster_density compresses the time window for coordinated proxy flows
+            #gap_hours = np.random.uniform(h_min, h_max) * v_bypass * (1.1 - topo['mule_cluster_density'])
+            #t_prev += timedelta(hours=float(max(0.1, gap_hours)))
+          
+            # 1. Base window from config
+            base_window = np.random.uniform(h_min, h_max)
+
+            # Role-based window using numeric index from Block 0
+            h_min, h_max = cfg['role_time_window'].get(sampling_cfg['role']['choices'][actor['role']], (1, 4))
+            base_window = np.random.uniform(h_min, h_max)
+            
+            
+            # 2. Apply risk-based compression (total_risk_mod)
+            # High risk actors (Advisors, low tenure, high centrality) move significantly faster
+            #risk_compression = 1.0 / total_risk_mod
+
+            # 2026 Production Update: Total_Behavioral_Risk now drives the temporal 'crunch'
+            risk_compression = 1.0 / Total_Behavioral_Risk
+
+            
+            # 3. Combine with 2026 Graph Topology and Rail Speed
+            # Mule density and risk_compression together create a unique high-velocity signature
+            gap_hours = base_window * v_bypass * (1.1 - topo['mule_cluster_density']) * risk_compression
+
+            # Optimized temporal 'crunch'
+            t_offset = opt_overrides.get(f"{pfx}topo_offset_f", 1.1)
+
+            # 3. Combine with Optimized Graph Topology
+            # Straightforward Handshake: Override the raw mule density config
+            mule_val = opt_overrides.get(f"{pfx}mule_density_f", topo.get('mule_cluster_density', 0))
+            
+            # 3. Combine with Optimized Graph Topology
+            # Optuna now tunes the 'crunch' by adjusting the observed density and the offset
+            gap_hours = base_window * v_bypass * (t_offset - mule_val) * risk_compression
+            
+            
+            # 4. Use Exponential distribution for the gap to increase "burstiness" for detection models
+            # We scale the mean (scale) by our calculated gap_hours divided by intensity
+            t_prev += timedelta(hours=float(max(0.05, np.random.exponential(scale=gap_hours / intensity))))
+
+            # 4. Optimized Exponential Burstiness
+            t_floor = opt_overrides.get(f"{pfx}time_floor_opt", 0.05)
+            t_scale_f = opt_overrides.get(f"{pfx}time_exp_scale_f", 1.0)
+            
+            t_delta = max(t_floor, np.random.exponential(scale=(gap_hours / intensity) * t_scale_f))
+            t_prev += timedelta(hours=float(t_delta))
+
+
+        # 6. Role-Driven Micro-Transactions (Modified by Fan-Out Ratio)
+        n_micro = int(cfg['micro_count'].get(actor['role'], 2) * topo['fan_out_ratio'] if current_label else 1)        
+
+        # 1. Resolve the Base Count (Zero Config Trust)
+        # We map index back to string for the key, but allow Optuna to override the result
+        role_str = sampling_cfg['role']['choices'][actor['role']]
+        m_base = opt_overrides.get(f"{pfx}micro_base_f", cfg['micro_count'].get(role_str, 2))
+        
+        # 2. Resolve the Multipliers (Zero Anchor Trust)
+        f_ratio = opt_overrides.get(f"{pfx}fan_out_ratio_f", topo.get('fan_out_ratio', 1.5))
+        m_offset = opt_overrides.get(f"{pfx}micro_label_offset", 1.0)
+        
+        # 3. Final Calculation
+        # Suspicious actors (current_label) use the optimized Fan-Out scaling,
+        # while normal actors use the optimized label offset.
+        if current_label:
+            n_micro = int(m_base * f_ratio)
+        else:
+            n_micro = int(m_offset)
+
+        # -----------------------------------------------
+        # 7. MICRO-TRANSACTIONS (Retrofitting label)
+        # -----------------------------------------------
+        # Micro-transactions in PEP typologies often mimic "Kickbacks" or "Fees"
+        #rows.extend(_generate_micro_tx(t_prev, amt, cfg, ref_date=ref_date, label=current_label, pools={"country_pool_primary": pep_pool}))
+
+    
