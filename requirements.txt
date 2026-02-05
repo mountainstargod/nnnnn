@@ -1,22 +1,747 @@
-dash==1.20.0
-dash-bootstrap-components==0.12.2
-dash-core-components==1.16.0
-dash-dangerously-set-inner-html==0.0.2
-dash-html-components==1.1.3
-dash-renderer==1.9.1
-dash-table==4.11.3
-pandas==1.1.4
-matplotlib==3.3.3
-numpy==1.19.4
-statsmodels==0.12.2
-plotly==4.14.1
-pytrends==4.7.3
-ipython==7.19.0
-jupyterplot==0.0.3
-psutil==5.8.0
-orca==1.6
-orca[server]
-keras==2.4.3
-keras-models==0.0.7
-Keras-Preprocessing==1.1.2
-tensorflow==2.4
+import json
+import numpy as np
+
+# Explicitly define the pools (fill with your real values)
+#_HIGH_RISK = ["IR", "SY", "AF"]
+#_ASIA = ["SG", "MY", "TH", "ID", "VN"]
+#_MAJOR = ["US", "UK", "EU"]
+
+
+scenario_config = {
+
+        "structuring": {
+            "n_credits_base": 8,
+            "n_credits_min": 5,
+            "gap_mean": 1.0,
+            "gap_sigma": 0.7,
+    
+            "amt_mu": 9475,
+            "amt_sigma": 250,
+            "amt_min": 9000,
+            "amt_max": 9950,
+    
+            "offshore_pool": [],
+            "domestic_pool": [],
+            "country_pool_primary": [],
+            "offshore_prob": 0.5,
+
+            "channel_probs": [0.4, 0.3, 0.2, 0.1],  # E.g., [ATM, Mobile, Branch, Web]
+            "channel_labels": ["ATM", "MOBILE", "BRANCH", "WEB"], # REQUIRED: Now your code can 'read' these
+            
+            "network_probs": [0.7, 0.2, 0.1],       # E.g., [KnownLowRisk, KnownHighRisk, Unknown]
+            "network_labels": ["LOW_RISK", "HIGH_RISK", "UNKNOWN"], # REQUIRED: For network-based TME
+
+            
+            "jurisdiction_probs": [0.8, 0.15, 0.05],   # E.g., [Domestic, AlliedForeign, HighRiskForeign]
+            "jurisdiction_labels": ["DOMESTIC", "ALLIED", "HIGH_RISK_FOREIGN"],  # REQUIRED: For jurisdictional risk
+
+            
+            "demographics": {
+                "PEP_prob": 0.05,
+                "NatRisk_probs": [0.7,0.25,0.05],
+                "AgeGroup_probs": [0.3,0.5,0.2],
+                "Occ_probs": [0.25,0.4,0.15,0.2],
+                "Income_probs": [0.4,0.4,0.2],
+                "EntityType_probs": [0.5,0.3,0.2],
+                "Industry_probs": [0.3,0.2,0.2,0.3]
+            },
+
+            "demographic_factors": {
+                "PEP": { "0": 1.0, "1": 3.2 },
+                "NatRisk": { "0": 1.0, "1": 1.8, "2": 4.1 },
+                "AgeGroup": { "0": 1.0, "1": 1.2, "2": 0.8 },
+                "Occ": { "0": 1.0, "1": 1.4, "2": 2.5, "3": 1.1 },
+                "Income": { "0": 1.0, "1": 1.6, "2": 3.1 },
+                "EntityType": { "0": 1.0, "1": 2.1, "2": 4.5 },
+                "Industry": { "0": 1.0, "1": 1.5, "2": 1.2, "3": 2.8 },
+                "velocity_sensitivity": 0.25,
+                "volume_sensitivity": 0.15,
+
+                "Channel": { "0": 1.0, "1": 1.2, "2": 1.8, "3": 2.5 },
+                "Network": { "0": 1.0, "1": 3.0, "2": 1.5 },
+                "Jurisdiction": { "0": 1.0, "1": 2.0, "2": 4.5 }
+                
+            },
+            
+    
+            "micro_alpha": 1.5,
+            "micro_beta": 3.5,
+            "micro_multiplier": 3,
+            "micro_amt_min": 10,
+            "micro_amt_max": 100,
+            "micro_tx_types": ["DEBIT", "CREDIT"]
+        },
+
+    
+
+      "velocity_spike": {
+        "n_bursts_base": 1,
+        "burst_size_base": 6,
+    
+        "amt_mu": 1100,
+        "amt_sigma": 400,
+        "amt_min": 200,
+        "amt_max": 2000,
+    
+        "country_pool_primary": [],
+    
+        "micro_alpha": 1.5,
+        "micro_beta": 4.0,
+        "micro_multiplier": 5,
+        "micro_amt_min": 20,
+        "micro_amt_max": 500,
+        "micro_tx_types": ["CREDIT", "DEBIT"],
+        "micro_tx_base": 2,
+
+        # /* 1. CHANNEL DIVERSITY (Instant & Crypto Rails) */
+        # /* Mix of traditional fiat and 2026 instant payment/stablecoin rails */
+        "channel_config": {
+            "rails": ["SEPA_INSTANT", "FED_NOW", "USDC_STABLECOIN", "TRAD_WIRE"],
+            "diversification_prob": 0.65,   # // High for professional mules
+            "hop_intensity_multiplier": 2.2
+        },
+    
+        # /* 2. NETWORK TOPOLOGY (Mule Coordination) */
+        # /* Defines node connectivity logic for graph-based detection */
+        "network_topology": {
+            "mule_cluster_density": 0.85, 
+            "centrality_threshold": 3.5,
+            "common_node_pool_size": 10,  # // Shared "cashing out" nodes
+            "layering_depth_min": 2,
+            "layering_depth_max": 5
+        },
+    
+        # /* 3. ECONOMIC SENSIBILITY (Transaction Rationality) */
+        # /* Modulates behavior based on the actor's economic capacity */
+        "economic_sensibility": {
+            "disposable_income_ratio": 0.4,
+            "savings_drain_threshold": 0.9,  # // Professional mules drain accounts to zero
+            "velocity_to_wealth_ratio_max": 5.0   #  // High ratio = low sensibility/high risk
+        },
+
+
+        "demographics": {
+            "F_burst": {"PEP": 2.5, "Business": 1.5, "risk_score_scale": 2.0},
+            "F_size":  {"risk_score_scale": 1.8, "Business": 1.4, "youth_boost": 1.2},
+            "F_inter": {"risk_score_scale": 2.5, "youth_boost": 1.5},
+            "F_intra": {"risk_score_scale": 3.0, "youth_boost": 2.0},
+            "F_amt":   {"PEP": 2.2, "risk_score_scale": 1.5, "Business": 1.3},
+            "F_micro": {"PEP": 0.5, "risk_score": 0.3}
+        },
+
+      },
+
+    
+
+
+    "layering": {
+        "n_hops_base": 4,
+        "hop_gap_hours_scale": 12.0,
+        "amt_min": 10000,
+        "amt_max": 50000,
+        "micro_multiplier": 4, ## Here is the missing line not added earlier: Essential for fan-out scaling
+        "country_pool_primary": [],
+    
+        "micro_alpha": 1.2,
+        "micro_beta": 3.0,
+        "micro_multiplier": 4,
+        "micro_amt_min": 100,
+        "micro_amt_max": 2000,
+        "micro_tx_types": ["DEBIT", "CREDIT"],
+        
+
+        # /* 1. NETWORK TOPOLOGY (Mule & Shell Coordination) */
+        # /* Essential for simulating fan-out/fan-in and circular flows */
+        "network_topology": {
+            "mule_cluster_density": 0.75,
+            "fan_out_ratio": 3.0,    #  // One node splits into 3
+            "fan_in_ratio": 0.33,    # // Three nodes merge into 1
+            "centrality_boost": 2.5, # // High centrality for "hub" nodes
+            "shell_company_depth": 3  # // Layers of corporate vehicles
+        },
+
+        # /* 2. CHANNEL DIVERSITY (Cross-Rail Obfuscation) */
+        # /* Simulates hopping between instant rails and crypto to break lineage */
+        "channel_config": {
+            "rails": ["SWIFT_GPI", "SEPA_INSTANT", "FED_NOW", "STABLECOIN_SETTLEMENT"],
+            "hop_diversification_prob": 0.70,
+            "rail_switch_intensity": 2.8,
+            "latency_bypass_multiplier": 0.4   # // Faster hops on instant rails
+        },
+
+        # /* 3. ECONOMIC SENSIBILITY (Rational Obfuscation) */
+        # /* Ensures "Rightness" of activity relative to profile to evade precision loss */
+        "economic_sensibility": {
+            "transaction_to_revenue_limit": 1.5,  # // E.g., not exceeding 150% of profile rev
+            "velocity_decay_on_low_wealth": 0.2,  # // Poor actors move funds slower/messier
+            "balance_retention_ratio": 0.05,      # // Mules rarely keep more than 5% balance
+            "staged_escalation_factor": 1.4       # // Gradually increasing amounts to avoid triggers
+        },
+
+        
+        "demographics": {
+            "entity_type_weights": {"individual": 0.5, "SME": 0.3, "corporate": 0.2},
+            "risk_score_weights": {"low": 0.5, "medium": 0.3, "high": 0.2},
+            "pep_status_prob": 0.5,
+            "nationality_weights": {"local": 0.7, "high_risk_offshore": 0.3},
+            "industry_options": ["finance", "trade", "tech", "other"],
+            
+            "n_hops_multiplier": {
+                "corporate": 2.5,
+                "high_risk": 2.0,
+                "SME": 1.2,
+                "individual": 1.0
+            },
+            "amt_multiplier": {
+                "corporate_finance": 3.5, 
+                "SME": 1.2, 
+                "PEP": 2.2,
+                "default": 1.0
+            },
+            "decay_factors": {
+                "default": [0.95, 0.99],
+                "high_risk": [0.85, 0.95]
+            },
+            "gap_compression": {
+                "corporate": 0.5,
+                "high_risk_offshore": 0.3,
+                "default": 1.0
+            },
+
+          "hop_gap_hours_scale_adjustment": {"corporate": 1.2, "high_risk_offshore": 0.8},
+    
+          "forward_amt_decay": {"default": [0.88, 0.995], "high_risk": [0.85, 0.995]},
+    
+          "tx_type_weights": {
+            "default": [0.4, 0.4, 0.2],
+            "corporate": [0.5, 0.4, 0.1],
+            "high_risk_offshore": [0.6, 0.3, 0.1]
+          },
+
+            # --- SIMPLE DIRECTION LOOKUP (Consistent with other typologies) ---
+            # Define local mapping to avoid massive config changes
+            # Layering is predominantly outbound (DEBIT)
+            "dir_map" : {
+                "high_risk_offshore": [0.1, 0.9], # 90% Debit for offshore hops
+                "corporate": [0.4, 0.6], 
+                "default": [0.3, 0.7]
+            }            
+            
+        }
+    },        
+
+
+      "biz_inflow_outflow_ratio": {
+        "n_tx_base": 10,
+        "amt_min": 1000,
+        "amt_max": 50000,
+        "inflow_multiplier_high": 1.5,
+        "inflow_multiplier_low": 0.8,
+        "outflow_multiplier_high": 1.5,
+        "outflow_multiplier_low": 0.8,
+        "random_factor_inflow": [0.9, 1.1],
+        "random_factor_outflow": [0.9, 1.1],
+        "tx_gap_hours": 6,
+        "timeframe_hours": [24, 168, 336],
+
+        # /* 1. NETWORK TOPOLOGY (Circular & Cluster Signals) */
+        # /* Moves beyond 1-to-1 flows to detect "U-Turn" and Cluster behaviors */
+        "network_topology": {
+            "circularity_prob": 0.25,       # // Probability of funds returning to source
+            "cluster_density": 0.80,        # // Degree of connectivity with known high-risk hubs
+            "u_turn_threshold_hours": 48,   # // Funds leaving and returning within this window
+            "mule_involvement_rate": 0.15   # // Probability of a layer being a transient account
+        },
+    
+        # /* 2. CHANNEL DIVERSITY (Cross-Rail Obfuscation) */
+        # /* High-risk APAC scenarios in 2026 involve "Rail Hopping" (e.g., mBridge, Stablecoins) */
+        "channel_config": {
+            "rails": ["FAST", "RTGS", "mBRIDGE_CBDC", "STABLECOIN_P2P"],
+            "rail_hopping_intensity": 2.5,   # // Frequency of switching rails to break lineage
+            "settlement_latency_bypass": 0.3 # // Faster hops for instant-clearing rails
+        },
+    
+        # /* 3. ECONOMIC SENSIBILITY (Rational Context) */
+        # /* Prevents "Precision Loss" by binding activity to the entity's profile */
+        "economic_sensibility": {
+            "revenue_to_velocity_cap": 2.2,   # // Velocity cannot exceed 220% of stated revenue
+            "balance_retention_floor": 0.10,  # // Entities must retain 10% to look "legitimate"
+            "staged_escalation_factor": 1.4,  # // Gradual volume increase to evade trigger thresholds
+            "seasonal_volatility_index": 0.4  # // 2026 APAC retail seasonality impact
+        },
+
+          
+        "demographic_factors": {
+          "Age": { "base": 1.0, "offset": 50, "divisor": 120 },
+          "Occupation": {'employee':1.0,'self_employed':1.15,'cash_intensive_business':1.25,'pep':1.35},
+          "Industry": {'retail':1.1,'wholesale':1.0,'services':0.9,'cash_heavy':1.3},
+          "EntityType": {'corporation':1.25,'sole_prop':0.9,'partnership':1.05},
+          "RiskScore_Scale": 0.05,
+          "Revenue_Scale": 50000.0            
+        },
+    
+        "demographic_sampling": {
+          "Occupation": {
+            "choices": ["employee", "self_employed", "cash_intensive_business", "pep"],
+            "probabilities": [0.5, 0.3, 0.15, 0.05]
+          },
+          "Industry": {
+            "choices": ["retail", "wholesale", "services", "cash_heavy"],
+            "probabilities": [0.25, 0.25, 0.3, 0.2]
+          },
+          "EntityType": {
+            "choices": ["corporation", "sole_prop", "partnership"],
+            "probabilities": [0.6, 0.3, 0.1]
+          },
+          "RiskScore": {
+            "low": 1,
+            "high": 10
+          }
+        }
+      },
+
+
+        
+        "biz_monthly_volume_deviation": {
+            "n_tx_base": 12,
+            "amt_mu": 500,
+            "amt_sigma": 200,
+            "tx_gap_days": 3,
+            "monthly_deviation_high": 1.5,
+            "monthly_deviation_low": 0.5,
+            "monthly_deviation_alt_high": 1.2,
+            "monthly_deviation_alt_low": 0.8,
+            "micro_alpha": 1.2,
+            "micro_beta": 3.0,
+            "micro_multiplier": 2,
+            "micro_amt_min": 10,
+            "micro_amt_max": 200,
+            "micro_tx_types": ["CREDIT", "DEBIT"],
+
+            # /* 1. NETWORK TOPOLOGY (Burst & Hub Coordination) */
+            # /* Focuses on 2026 APAC "Burst" patterns where volume is coordinated across clusters */
+            "network_topology": {
+                "mule_cluster_density": 0.65,   # // Co-occurrence of deviations across related accounts
+                "burst_node_centrality": 2.4,   # // Intensity of flow through a single hub during deviation
+                "inter-account_linkage": 0.40,  # // Probability of "mirroring" another entity's volume spike
+                "shell_depth_offset": 2         # // Hidden layers between source and destination
+            },
+        
+            # /* 2. CHANNEL DIVERSITY (Rail-Hopping & Lineage Breaks) */
+            # /* Uses modern APAC rails (FAST, CBDCs) to mask the deviation origin */
+            "channel_config": {
+                "rails": ["FAST_NET", "RTGS_GLOBAL", "PAY_NOW", "USDT_STABLECOIN"],
+                "hop_diversification_prob": 0.60,
+                "rail_switch_intensity": 2.2,
+                "latency_bypass_multiplier": 0.25  # // Instant settlement during deviation bursts
+            },
+        
+            # /* 3. ECONOMIC SENSIBILITY (Rational Growth Context) */
+            # /* Prevents "impossible" spikes relative to BusinessSize and Sophistication */
+            "economic_sensibility": {
+                "revenue_deviation_cap": 3.0,     # // Volume cannot exceed 300% of profile monthly average
+                "staged_escalation_factor": 1.5,  # // Gradual build-up before the major deviation spike
+                "balance_retention_ratio": 0.08,  # // Minimal "dust" left in account to look legitimate
+                "sophistication_decay": 0.4       # // High-sophistication actors use cleaner, smaller deviations
+            },
+            
+    
+            "demographic_factors": {
+                "RiskScore_Weight": 0.05,
+                "Region": { 'Domestic': 1.0, 'Offshore': 1.5, 'HighRiskOffshore': 2.2 },
+                "BusinessSize": {'Small':0.8,'Medium':1.0,'Large':1.2},
+                "Sophistication": {'Low':0.8,'Medium':1.0,'High':1.2},
+                "Occupation": { 'Owner':[0.6,0.4],'Intermediary':[0.5,0.5],'Employee':[0.4,0.6] }
+            },
+    
+            "demographic_sampling": {
+                "Age": {
+                    "choices": [18, 25, 40, 60],
+                    "probabilities": [0.2, 0.4, 0.3, 0.1]
+                },
+                "Region": {
+                    "choices": ["Domestic", "Offshore", "HighRiskOffshore"],
+                    "probabilities": [0.7, 0.2, 0.1]
+                },
+                "Occupation": {
+                    "choices": ["Owner", "Intermediary", "Employee"],
+                    "probabilities": [0.5, 0.3, 0.2]
+                },
+                "RiskScore": {"a": 2, "b": 5},
+                "BusinessSize": {
+                    "choices": ["Small", "Medium", "Large"],
+                    "probabilities": [0.5, 0.3, 0.2]
+                },
+                "Sophistication": {
+                    "choices": ["Low", "Medium", "High"],
+                    "probabilities": [0.3, 0.4, 0.3]
+                }
+            }
+        },
+
+
+
+        "biz_round_tripping": {
+            "n_cycles_base": 2,
+            "amt_min": 1000000,
+            "amt_max": 10000000,
+            "cycle_gap_hours": 24,
+            "max_hops": 15,
+            "hop_multiplier_low": 0.8,
+            "hop_multiplier_high": 1.2,
+            "structuring_tx_base": 8,
+            "structuring_gap_mean": 1.0,
+            "structuring_gap_sigma": 0.7,
+            "structuring_amt_mu": 1000000,
+            "structuring_amt_sigma": 50000,
+            "structuring_amt_max": 10000000,
+    
+            "micro_params": {
+                "alpha": 1.2,
+                "beta": 3.0,
+                "multiplier": 2,
+                "amt_min": 50,
+                "amt_max": 300,
+                "tx_types": ["CREDIT","DEBIT"]
+                
+            },
+
+
+            # /* 1. NETWORK TOPOLOGY (Circular Structural Complexity) */
+            # /* Simulates 2026 professional money laundering where funds pass through 
+            #   coordinated shell clusters to disguise the "U-Turn". */
+            "network_topology": {
+                "mule_cluster_density": 0.85,    # // High coordination between circular nodes
+                "circular_path_depth": 5,        # // Minimum hops before a fund returns
+                "fan_in_out_coordination": 1.4,  # // Degree of splitting/merging during the cycle
+                "node_centrality_limit": 0.3,    # // Funds are spread across nodes to avoid central hubs
+                "shell_company_depth": 4         # // Layers of offshore corporate vehicles used
+            },
+        
+            # /* 2. CHANNEL DIVERSITY (Cross-Rail Lineage Breaks) */
+            # /* Breaking the audit trail using instant APAC rails and Stablecoin settlements. */
+            "channel_config": {
+                "rails": ["SWIFT_GO", "mBRIDGE_CBDC", "STABLECOIN_SETTLEMENT", "RTGS_APAC"],
+                "hop_diversification_prob": 0.75, # // High probability of rail switching
+                "rail_switch_intensity": 3.0,     # // Drastic rail changes (e.g. Fiat to Crypto back to Fiat)
+                "latency_bypass_multiplier": 0.2  # // Near-instant hops for CBDC/Stablecoin legs
+            },
+        
+            # /* 3. ECONOMIC SENSIBILITY (Rational Capital Obfuscation) */
+            # /* Ensuring massive capital flows don't trigger "Precision Loss" by 
+            #   simulating trade-based laundering or staged movements. */
+            "economic_sensibility": {
+                "revenue_to_velocity_cap": 4.5,  # // Total cycles cannot exceed 4.5x annual revenue
+                "balance_retention_ratio": 0.03, # // Minimal residue (3%) left at each hop
+                "staged_escalation_factor": 1.2, # // Gradual increase in cycle amounts to evade triggers
+                "trade_based_layering_mod": 0.6  # // Mimics fake invoices to look like business trade
+            },
+
+            
+            "demographic_factors": {
+                #"CycleScale": "1.0 + 0.1*{'Small':0,'Medium':1,'Large':2,'Multi-National':3}[sz]",
+                "CycleScale": {'Small': 1.0, 'Medium': 1.1, 'Large': 1.2, 'Multi-National': 1.3},                
+                "BaseAmount": {'Small':0.8, 'Medium':1.0, 'Large':1.2, 'Multi-National':1.5},
+                "Complexity_Weight": 0.1,
+                "Ownership_Tx_Probs": {
+                    "Private": [0.6, 0.4],
+                    "Public": [0.5, 0.5],
+                    "State-Owned": [0.5, 0.5],
+                    "Foreign": [0.7, 0.3]
+                }                
+            },
+    
+            "demographic_sampling": {
+                "EntityType": {"choices":["Corporation","Private","Subsidiary"], "probabilities":[0.6,0.3,0.1]},
+                "EntitySize": {"choices":["Small","Medium","Large","Multi-National"], "probabilities":[0.2,0.5,0.2,0.1]},
+                "OwnershipType": {"choices":["Private","Public","State-Owned","Foreign"], "probabilities":[0.5,0.3,0.1,0.1]},
+                "IndustrySector": {"choices":["Finance","Trade","Manufacturing","Services"], "probabilities":[0.2,0.4,0.2,0.2]},
+                #"ComplexityLevel": np.random.randint(sampling_cfg['ComplexityLevel']['min'], sampling_cfg['ComplexityLevel']['max'] + 1),
+                "ComplexityLevel": {"min":1, "max":5},
+
+                #"RiskScore": {"min": 1, "max": 10},  // Add this here
+                "RiskDistribution": { "alpha": 2.0, "beta": 5.0, "scale": 10.0 },
+                
+                "CrossBorderFactor": 1.0
+            }
+        },
+        
+
+
+
+      "biz_flag_non_nexus": {
+        "n_tx_base": 6,
+        "tx_gap_days": 2.0,   # <--- INSERT HERE (Baseline velocity)
+        "amt_min": 1000,
+        "amt_max": 5000,
+        "foreign_pool": ["BVI", "CAY", "PANAMA", "HK", "CN", "ID", "VN", "MY", "TH"],
+        "local_pool": ["SG"],
+        "offshore_prob": 1.0,
+
+
+        # /* 1. NETWORK TOPOLOGY (Structural Distancing) */
+        # /* Simulates 2026 obfuscation where non-nexus flows are hidden behind 
+        #   coordinated shell clusters and intermediary distancing nodes. */
+        "network_topology": {
+            "mule_cluster_density": 0.55,    # Degree of coordination with non-nexus hubs
+            "shell_company_depth": 3,        # Layers of corporate vehicles used to mask origin
+            "node_centrality_boost": 2.1,    # High centrality for non-nexus "gatekeeper" nodes
+            "inter-account_linkage": 0.45,   # Probability of shared beneficial ownership signals
+            "fan_out_ratio": 2.5             # Number of parallel non-nexus destinations
+        },
+    
+        # /* 2. CHANNEL DIVERSITY (Rail-Hopping Obfuscation) */
+        # /* Uses modern APAC rails to mask geographical lineage and break the nexus trail. */
+        "channel_config": {
+            "rails": ["mBRIDGE_CBDC", "STABLECOIN_P2P", "FAST_APAC", "INSTANT_SWIFT"],
+            "hop_diversification_prob": 0.65, # Probability of switching rails mid-stream
+            "rail_switch_intensity": 2.4,     # Frequency of changing payment rails
+            "latency_bypass_multiplier": 0.35 # Temporal acceleration for instant clearing rails
+        },
+    
+        # /* 3. ECONOMIC SENSIBILITY (Rational Obfuscation) */
+        # /* Binds transaction volume to profile "rightness" to reduce False Positives. */
+        "economic_sensibility": {
+            "revenue_to_velocity_cap": 2.8,   # Total flow vs Profile Revenue ceiling
+            "balance_retention_ratio": 0.07,  # Minimal residue left in account to look legitimate
+            "staged_escalation_factor": 1.3,  # Gradual volume increase before the non-nexus spike
+            "velocity_decay_on_low_wealth": 0.5 # Poorer actors move funds slower/messier
+        },
+
+
+          
+        "micro_params": {
+          "alpha": 1.2,
+          "beta": 3.0,
+          "multiplier": 2,
+          "amt_min": 50,
+          "amt_max": 300,
+          "tx_types": ["CREDIT"]
+          
+        },
+    
+        "demographic_sampling": {
+          "Age": {"choices":["18-25","26-40","41-65","65+"], "probabilities":[0.15,0.45,0.35,0.05]},
+          "Occupation": {"choices":["Finance","Retail","PublicService","Other"], "probabilities":[0.25,0.35,0.2,0.2]},
+          "Nationality": {"choices":["Domestic","International"], "probabilities":[0.7,0.3]},
+          "EntityType": {"choices":["Individual","SmallBusiness","Corporate"], "probabilities":[0.5,0.3,0.2]},
+          "RiskProfile": {"choices":["Low","Medium","High"], "probabilities":[0.5,0.35,0.15]},
+          "ActivityLevel": {"choices":["Low","Medium","High"], "probabilities":[0.4,0.4,0.2]}
+        },
+    
+        "demographic_factors": {
+          "Age": {'18-25':1.2,'26-40':1.0,'41-65':0.9,'65+':0.7},
+          "Occupation": {'Finance':1.2,'Retail':1.0,'PublicService':0.9,'Other':0.95},
+          "EntityType": {'Individual':1.0,'SmallBusiness':1.1,'Corporate':1.3},
+          "RiskProfile": {'Low':0.8,'Medium':1.0,'High':1.3},
+          "ActivityLevel": {'Low':0.8,'Medium':1.0,'High':1.2},
+          "Nationality": {'Domestic':0.8,'International':1.2},
+
+          # 2026 PROBABILISTIC DIRECTION (New Added Dictionary)
+          "tx_direction_weights": {
+              "Individual": [0.4, 0.6],    # 60% Debit (More retail spread)
+              "SmallBusiness": [0.3, 0.7], # 70% Debit (Suppliers/Operating)
+              "Corporate": [0.1, 0.9]      # 90% Debit (Dispersal/Layering logic)
+          }
+
+            
+        }
+      },        
+        
+
+      "biz_flag_pep_indonesia": {
+        "n_tx_base": 6,
+        "amt_min": 500,
+        "amt_max": 3000,
+        "pep_pool": ["IDN"],
+
+
+        # /* 1. NETWORK TOPOLOGY (Proxy & Intermediary Coordination) */
+        # /* Focuses on the 2026 "Proxy-Hub" model where PEPs utilize 
+        #   coordinated clusters of intermediaries to distance the beneficial owner. */
+        "network_topology": {
+            "mule_cluster_density": 0.80,   # // High coordination between Intermediaries
+            "proxy_layer_depth": 3,         # // Number of hops between PEP and Destination
+            "node_centrality_boost": 2.5,   # // High centrality for "Advisor" gatekeepers
+            "shell_company_depth": 2,       # // Corporate vehicles used to mask IDN flows
+            "fan_out_ratio": 4.0            # // Number of sub-accounts used for fan-out
+        },
+    
+        # /* 2. CHANNEL DIVERSITY (Cross-Border Rail Obfuscation) */
+        # /* Utilizing APAC's instant rails (BI-FAST, mBridge) to break traditional lineage. */
+        "channel_config": {
+            "rails": ["BI_FAST", "mBRIDGE_CBDC", "IDN_QRIS_GLOBAL", "STABLECOIN_SETTLEMENT"],
+            "hop_diversification_prob": 0.70, # // Frequency of rail switching
+            "rail_switch_intensity": 2.8,     # // Intensity of switching between Fiat and Digital
+            "latency_bypass_multiplier": 0.25 # // Near-instant clearing for BI-FAST legs
+        },
+    
+        # /* 3. ECONOMIC SENSIBILITY (Rational Wealth Context) */
+        # /* Prevents "Precision Loss" by binding flows to tenure and role-based wealth. */
+        "economic_sensibility": {
+            "wealth_to_velocity_cap": 3.5,    # // Volume cannot exceed 350% of profile wealth
+            "balance_retention_ratio": 0.12,  # // Significant residue left in proxy accounts
+            "staged_escalation_factor": 1.5,  # // Gradual build-up to evade fixed OJK triggers
+            "tenure_decay_factor": 0.8        # // Longer tenure PEPs use cleaner, slower flows
+        },
+
+          
+        "micro_params": {
+          "alpha": 1.2,
+          "beta": 3.0,
+          "multiplier": 2,
+          "amt_min": 20,
+          "amt_max": 200,
+          "tx_types": ["CREDIT"]
+          
+        },
+    
+        "demographic_sampling": {
+          "age_range": [35, 70],
+          "gender": {"choices": ["Male","Female"], "probabilities": [0.7,0.3]},
+          "role": {"choices": ["Minister","Advisor","Intermediary"], "probabilities": [0.1,0.2,0.7]},
+          "tenure_range": [1,10],
+          "entity_type": {"choices": ["Individual","Corporate"], "probabilities": [0.6,0.4]}
+        },
+    
+        "demographic_factors": {
+            "role": {
+                "Minister": 2.5, 
+                "Advisor": 1.8, 
+                "Intermediary": 1.2
+            },
+            "entity_type": {
+                "Corporate": 1.5, 
+                "Individual": 1.0
+            },
+            "tenure_weight": 0.15
+        },
+          
+        "amount_matrix": {
+            "Minister_Corporate": [50000, 200000],
+            "Advisor_Corporate": [20000, 100000],
+            "Default": [5000, 50000]
+        },
+    
+        "role_time_window": {
+          "Minister": [6,24],
+          "Advisor": [3,12],
+          "Intermediary": [1,6]
+        },
+    
+        "micro_count": {
+          "Minister": 3,
+          "Advisor": 5,
+          "Intermediary": 8
+        },
+
+        "direction_logic" : {
+            "Minister": {"Corporate": [0.2, 0.8], "Individual": [0.4, 0.6]},
+            "Advisor": {"Corporate": [0.6, 0.4], "Individual": [0.5, 0.5]},
+            "Intermediary": {"Corporate": [0.7, 0.3], "Individual": [0.9, 0.1]}
+        }
+          
+          
+      },
+
+
+      "biz_flag_personal_to_corp": {
+        "n_tx_base": 6,
+        "n_tx_min": 3,
+        "amt_min": 1000,
+        "amt_max": 8000,
+
+        # /* 1. NETWORK TOPOLOGY (Shadow Corporate Coordination) */
+        # /* Simulates the 2026 "Personal-as-a-Hub" model where a personal account 
+        #   interfaces with a coordinated cluster of corporate shells. */
+        "network_topology": {
+            "mule_cluster_density": 0.65,   # // Co-occurrence of flows with related business clusters
+            "shell_company_depth": 2,       # // Layers of business entities used to distance the flow
+            "node_centrality_boost": 2.2,   # // High centrality for accounts acting as "Shadow Treasuries"
+            "fan_out_ratio": 3.0,           # // Number of corporate entities receiving funds
+            "inter-account_linkage": 0.40   # // Probability of shared digital footprints/Nexus
+        },
+    
+        # /* 2. CHANNEL DIVERSITY (Cross-Rail Obfuscation) */
+        # /* Uses modern APAC rails (FAST, mBridge) to break the lineage of payroll/business income. */
+        "channel_config": {
+            "rails": ["FAST_APAC", "STABLECOIN_P2P", "PAY_NOW_QR", "RTGS_BUSINESS"],
+            "hop_diversification_prob": 0.60, # // Frequency of switching rails to mask intent
+            "rail_switch_intensity": 2.5,     # // Intensity of switching between retail and wholesale rails
+            "latency_bypass_multiplier": 0.3  # // Faster settlement for instant clearing rails
+        },
+    
+        # /* 3. ECONOMIC SENSIBILITY (Rational Obfuscation) */
+        # /* Prevents "Detection Blind Spots" by ensuring the flow is profile-consistent 
+        #   relative to the actor's age, occupation, and stated income. */
+        "economic_sensibility": {
+            "income_to_velocity_cap": 3.2,      # // Personal flow cannot exceed 320% of monthly income
+            "balance_retention_ratio": 0.15,    # // Proportion of funds kept for personal expenses (residue)
+            "staged_escalation_factor": 1.4,    # // Gradual increase in business-like volume to evade triggers
+            "velocity_decay_on_low_wealth": 0.6  #  // Non-professional actors exhibit messier/slower flows
+        },
+
+          
+        "demographic_sampling": {
+          "age_range": [22, 66],
+          "occupation": {
+            "choices": ["Salaried", "Freelancer", "SmallBusinessOwner", "Retired"],
+            "probabilities": [0.5, 0.2, 0.2, 0.1]
+          },
+          "income_lognormal": {"mean": 4, "sigma": 0.5},
+          "entity_type": {
+            "choices": ["PurePersonal", "BusinessLinked"],
+            "probabilities": [0.6, 0.4]
+          },
+          "risk_profile": {
+            "choices": ["Low", "Medium", "High"],
+            "probabilities": [0.6, 0.3, 0.1]
+          }
+        },
+    
+        "demographic_factors": {
+            "age": { "young": 1.0, "senior": 1.5 },
+            "occupation": {
+                "Salaried": 1.0, 
+                "Freelancer": 1.5, 
+                "SmallBusinessOwner": 2.5, 
+                "Retired": 0.8
+            },
+            "income_divisor": 50.0,
+            "entity_type": { "PurePersonal": 1.0, "BusinessLinked": 3.0 },
+            "risk_profile": { "Low": 0.5, "Medium": 1.5, "High": 3.5 },
+            "timing_base": 12.0
+        },
+    
+        "corporate": {
+            "base_fraction": 0.4,
+            "entity_type_factor": { "PurePersonal": 1.0, "BusinessLinked": 1.8 },
+            "risk_factor": { "Low": 0.8, "Medium": 1.2, "High": 2.5 },
+            "max_fraction": 0.95,
+            "prob_debit_high": 0.6, # Static parameter
+            "prob_debit_default": 0.5 # Static parameter            
+        },
+    
+        "micro_params": {
+          "alpha": 1.2,
+          "beta": 3.0,
+          "multiplier": 2,
+          "amt_min": 50,
+          "amt_max": 400,
+          "tx_types": ["CREDIT", "DEBIT"],
+          "age_threshold": 30,
+          "low_age_frac": 0.05,
+          "default_frac": 0.1          
+        }
+      }
+    
+    
+}
+
+
+
+# SAVE JSON
+with open("scenario_config.json", "w") as f:
+    json.dump(scenario_config, f, indent=4)
+
+print("Saved scenario_config.json")
