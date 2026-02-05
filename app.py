@@ -4638,3 +4638,599 @@ def generate_events_from_params(acct, ref_date, anchor, intensity, params, party
 
 
 
+    elif scenario_type == "biz_flag_non_nexus":
+    
+        cfg = scenario_config['biz_flag_non_nexus']
+        sampling_cfg = cfg['demographic_sampling']
+        multipliers = cfg['demographic_factors']
+
+        # --- 0. EXTRACT 2026 3D PARAMETERS ---
+        topo, chan, econ = cfg['network_topology'], cfg['channel_config'], cfg['economic_sensibility']
+
+        # Helper function to handle flattened dictionary from Bayesian Optimization
+        def get_factor(source, actor_val):
+            # If it's the expected dict, do a lookup
+            if isinstance(source, dict):
+                return source.get(str(actor_val), 1.0)
+            # If it's a flattened number (like your debug showed), use it directly
+            if isinstance(source, (int, float)):
+                return float(source)
+            return 1.0
+            
+        
+        # -----------------------------------------------
+        # 2. SYNTHETIC DEMOGRAPHICS (SAMPLING)
+        # -----------------------------------------------
+        actor = {
+            "Age": np.random.choice(sampling_cfg['Age']['choices'], p=sampling_cfg['Age']['probabilities']),
+            "Occupation": np.random.choice(sampling_cfg['Occupation']['choices'], p=sampling_cfg['Occupation']['probabilities']),
+            "Nationality": np.random.choice(sampling_cfg['Nationality']['choices'], p=sampling_cfg['Nationality']['probabilities']),
+            "EntityType": np.random.choice(sampling_cfg['EntityType']['choices'], p=sampling_cfg['EntityType']['probabilities']),
+            "RiskProfile": np.random.choice(sampling_cfg['RiskProfile']['choices'], p=sampling_cfg['RiskProfile']['probabilities']),
+            "ActivityLevel": np.random.choice(sampling_cfg['ActivityLevel']['choices'], p=sampling_cfg['ActivityLevel']['probabilities'])
+        }
+
+        # Mandatory Dual-Prefix Handshake
+        pfx = f"{scenario_type}_"
+
+        def dynamic_sample(field_name):
+            """
+            Optimized index-based sampler:
+            1. Targets opt_overrides using f"{scenario_type}_{field_name}_probs"
+            2. Falls back to sampling_cfg priors if no Optuna gain exists
+            """
+            prob_key = f"{pfx}{field_name}_probs"
+            
+            # Fetch baseline probabilities from the nested sampling_cfg
+            default_probs = sampling_cfg.get(field_name, {}).get('probabilities', [])
+            
+            # Retrieve the Bayesian-warped distribution from Upstream
+            p_vector = opt_overrides.get(prob_key, default_probs)
+            
+            # Returns integer index (0, 1, 2...) matching the choices length
+            return np.random.choice(len(p_vector), p=p_vector)
+
+        # -----------------------------------------------
+        # 2. SYNTHETIC DEMOGRAPHICS (OPTIMIZED)
+        # -----------------------------------------------
+        actor = {
+            "Age":           dynamic_sample("Age"),
+            "Occupation":    dynamic_sample("Occupation"),
+            "Nationality":   dynamic_sample("Nationality"),
+            "EntityType":    dynamic_sample("EntityType"),
+            "RiskProfile":   dynamic_sample("RiskProfile"),
+            "ActivityLevel": dynamic_sample("ActivityLevel")
+        }
+
+
+        
+        # -----------------------------------------------
+        # 3. DIRECT LOOKUP MULTIPLIERS (RE-ENABLED)
+        # -----------------------------------------------
+        # Each factor now pulls a numeric weight from the JSON dictionaries
+        AgeFactor         = multipliers['Age'].get(actor['Age'], 1.0)
+        OccupationFactor  = multipliers['Occupation'].get(actor['Occupation'], 1.0)
+        EntityTypeFactor  = multipliers['EntityType'].get(actor['EntityType'], 1.0)
+        RiskFactor        = multipliers['RiskProfile'].get(actor['RiskProfile'], 1.0)
+        ActivityFactor    = multipliers['ActivityLevel'].get(actor['ActivityLevel'], 1.0)
+        NationalityFactor = multipliers['Nationality'].get(actor['Nationality'], 1.0)
+
+        # 1. 3D RISK MODIFIER (Defined first as a dependency)
+        total_risk_mod = max(1e-6,
+                         (topo['node_centrality_boost'] if actor['RiskProfile'] == "High" else 1.0) * \
+                         (chan['rail_switch_intensity'] / 2.0) * \
+                         (econ['staged_escalation_factor'] if actor['Nationality'] == "International" else 1.0)
+        )
+
+        # --- 1. COMPOUND DEMOGRAPHIC LOOKUPS ---
+        # Using get_factor to ensure stability for Bayesian Optimization
+        age_f         = get_factor(multipliers.get('Age'), actor['Age'])
+        occ_f         = get_factor(multipliers.get('Occupation'), actor['Occupation'])
+        entity_f      = get_factor(multipliers.get('EntityType'), actor['EntityType'])
+        risk_f        = get_factor(multipliers.get('RiskProfile'), actor['RiskProfile'])
+        activity_f    = get_factor(multipliers.get('ActivityLevel'), actor['ActivityLevel'])
+        nationality_f = get_factor(multipliers.get('Nationality'), actor['Nationality'])
+
+        # Create the Static Demographic Foundation (D_Risk)
+        # Note: ActivityFactor is critical here—high activity in non-nexus regions is the core anomaly
+        D_Risk = (age_f * occ_f * entity_f * risk_f * activity_f * nationality_f)
+
+
+
+        
+        pfx = f"{scenario_type}_"
+
+        # --- 1. RECONCILED MULTIPLIER LOOKUPS (OPTIMIZED) ---
+        # Optuna finds the 'Separability Gap' by tuning these weights
+        age_f = opt_overrides.get(f"{pfx}age_f", 
+                                  get_factor(multipliers.get('Age'), actor['Age']))
+        
+        occ_f = opt_overrides.get(f"{pfx}occ_f", 
+                                  get_factor(multipliers.get('Occupation'), actor['Occupation']))
+        
+        entity_f = opt_overrides.get(f"{pfx}entity_f", 
+                                     get_factor(multipliers.get('EntityType'), actor['EntityType']))
+        
+        risk_f = opt_overrides.get(f"{pfx}risk_f", 
+                                   get_factor(multipliers.get('RiskProfile'), actor['RiskProfile']))
+        
+        activity_f = opt_overrides.get(f"{pfx}activity_f", 
+                                       get_factor(multipliers.get('ActivityLevel'), actor['ActivityLevel']))
+        
+        nationality_f = opt_overrides.get(f"{pfx}nationality_f", 
+                                          get_factor(multipliers.get('Nationality'), actor['Nationality']))
+
+        # Create the Static Demographic Foundation (D_Risk)
+        # Optimized D_Risk acts as the 'Profile + Regional' anchor for the Non-Nexus typology
+        D_Risk = (age_f * occ_f * entity_f * risk_f * activity_f * nationality_f)
+
+        
+        
+        # --- 2. THE 2026 TOTAL BEHAVIORAL RISK BRIDGE ---
+        # 1e-6 Safeguard prevents mathematical failure during BO trials
+        Total_Behavioral_Risk = max(1e-6, (
+            D_Risk * 
+            (topo['node_centrality_boost'] if actor['RiskProfile'] == "High" else 1.0) * 
+            (chan['rail_switch_intensity'] / 2.0) * 
+            (econ['staged_escalation_factor'] if actor['Nationality'] == "International" else 1.0)
+        ))
+
+                             
+        
+
+        # --- 2. RECONCILED BEHAVIORAL RISK (FIXED PREFIXING) ---
+        
+        # A. Topological Boost (Targeting High Risk Profile)
+        node_boost = opt_overrides.get(f"{pfx}node_centrality_f", topo.get('node_centrality_boost', 1.0))
+        node_base  = opt_overrides.get(f"{pfx}node_base_f", 1.0)
+        
+        # B. Channel Intensity (Optimizing numerator and divisor)
+        rail_int = opt_overrides.get(f"{pfx}rail_intensity_f", chan.get('rail_switch_intensity', 1.0))
+        rail_div = opt_overrides.get(f"{pfx}rail_divisor", 2.0)
+        
+        # C. Economic Escalation (Targeting International Nationality)
+        # Note: Non-Nexus anomaly relies heavily on this Escalation vs Base contrast
+        esc_fact = opt_overrides.get(f"{pfx}escalation_f", econ.get('staged_escalation_factor', 1.0))
+        esc_base = opt_overrides.get(f"{pfx}escalation_base_f", 1.0)
+
+        # --- EXECUTION: NO HARDCODED ANCHORS ---
+        Total_Behavioral_Risk = max(1e-6, (
+            D_Risk * 
+            (node_boost if actor['RiskProfile'] == "High" or actor['RiskProfile'] == 2 else node_base) * 
+            (rail_int / rail_div) * 
+            (esc_fact if actor['Nationality'] == "International" or actor['Nationality'] == 1 else esc_base)
+        ))
+        
+        
+        # 2. INTENSITY CALCULATION (Function of total_risk_mod)
+        if np.random.random() < 0.20:
+            intensity = np.random.lognormal(mean=0.9, sigma=0.4) * total_risk_mod
+            intensity = np.clip(intensity, 2.5, 6.0)
+            nexus_mismatch_score = np.random.uniform(3.0, 5.0)
+        else:
+            intensity = np.random.uniform(0.8, 1.2)
+            nexus_mismatch_score = np.random.uniform(0.5, 1.5)
+
+
+
+
+        # 1. 2026 Nexus Logic: Determine the 'Anomaly Mode'
+        is_non_nexus_surge = np.random.random() < 0.20
+
+        # 2. Dynamic Intensity Calculation
+        if is_non_nexus_surge:
+            # High intensity represents a 'Capital Flight' or 'Shadow Banking' burst
+            # We use lognormal for the heavy-tailed nature of financial crime
+            base_intensity = np.random.lognormal(mean=0.9, sigma=0.4)
+            intensity = base_intensity * Total_Behavioral_Risk
+            
+            # The Nexus Mismatch represents how 'illogical' the geography/industry is
+            # In 2026, higher behavioral risk should correlate with deeper nexus mismatches
+            nexus_mismatch_score = np.random.uniform(3.0, 5.0) * (Total_Behavioral_Risk / 2.0)
+        else:
+            # Baseline behavior
+            intensity = np.random.uniform(0.8, 1.2) * (Total_Behavioral_Risk * 0.5)
+            nexus_mismatch_score = np.random.uniform(0.5, 1.5)
+
+
+        # --- 1. NEXUS ANOMALY LOGIC (OPTIMIZED) ---
+        n_surge_prob = opt_overrides.get(f"{pfx}nexus_surge_prob", 0.20)
+        is_non_nexus_surge = np.random.random() < n_surge_prob
+
+        # --- 2. DYNAMIC INTENSITY CALCULATION ---
+        if is_non_nexus_surge:
+            # High intensity: 'Capital Flight' burst (Pareto/Heavy-tailed)
+            m_mean  = opt_overrides.get(f"{pfx}msb_log_mean", 0.9)
+            m_sigma = opt_overrides.get(f"{pfx}msb_log_sigma", 0.4)
+            
+            base_intensity = np.random.lognormal(mean=m_mean, sigma=m_sigma)
+            intensity = base_intensity * Total_Behavioral_Risk
+            
+            # Optimized Mismatch Score (The 'Shadow Banking' signature)
+            m_low  = opt_overrides.get(f"{pfx}mismatch_uni_low", 3.0)
+            m_high = opt_overrides.get(f"{pfx}mismatch_uni_high", 5.0)
+            m_div  = opt_overrides.get(f"{pfx}mismatch_divisor", 2.0)
+            
+            nexus_mismatch_score = np.random.uniform(m_low, m_high) * (Total_Behavioral_Risk / m_div)
+        else:
+            # Baseline behavior (Optimized Uniform bounds)
+            n_low   = opt_overrides.get(f"{pfx}norm_uni_low", 0.8)
+            n_high  = opt_overrides.get(f"{pfx}norm_uni_high", 1.2)
+            r_scale = opt_overrides.get(f"{pfx}norm_risk_scale", 0.5)
+            
+            intensity = np.random.uniform(n_low, n_high) * (Total_Behavioral_Risk * r_scale)
+            
+            b_low  = opt_overrides.get(f"{pfx}base_mismatch_low", 0.5)
+            b_high = opt_overrides.get(f"{pfx}base_mismatch_high", 1.5)
+            nexus_mismatch_score = np.random.uniform(b_low, b_high)
+
+        
+        # 3. DYNAMIC SAFEGUARDS (Replacing the hard np.clip)
+        # Allows Bayesian Optimization to tune the 'Difficulty' of the anomaly
+        int_floor = trial.suggest_float("nexus_int_floor", 0.1, 1.0)
+        int_ceiling = trial.suggest_float("nexus_int_ceiling", 5.0, 15.0)
+
+        intensity = max(int_floor, min(int_ceiling, round(intensity, 2)))
+        nexus_mismatch_score = round(nexus_mismatch_score, 2)
+
+
+        i_floor = opt_overrides.get(f"{pfx}int_floor", 0.1)
+        i_ceiling = opt_overrides.get(f"{pfx}int_ceiling", 15.0)
+
+        # Apply optimized safeguards and rounding
+        intensity = max(i_floor, min(i_ceiling, round(intensity, 2)))
+        nexus_mismatch_score = round(nexus_mismatch_score, 2)
+        
+        
+        # 3. LABEL DETERMINATION (Threshold adjusted by total_risk_mod)
+        #if (intensity > (3.5 / total_risk_mod) and nexus_mismatch_score > 2.5) or \
+           #(topo['mule_cluster_density'] > 0.7):
+            #current_label = 1
+        #else:
+            #current_label = 0
+
+        is_high_risk_entity = 1.5 if actor['EntityType'] in ['Offshore-Corp', 'Holding-LLC', 'Shell-Co'] else 1.0
+        if (intensity > (3.5 / total_risk_mod) and nexus_mismatch_score > 2.5) or \
+           (is_high_risk_entity > 1.0 and nexus_mismatch_score > 2.0) or \
+           (topo['mule_cluster_density'] > 0.7):
+            current_label = 1
+        else:
+            current_label = 0
+
+
+
+
+        # --- 1. DYNAMIC RISK SCORE (DRS) ---
+        # We replace the simplistic 'is_high_risk_entity' with the holistic UBR
+        # This already includes EntityType, Jurisdiction, and PEP status
+        dynamic_risk = Total_Behavioral_Risk * (1.0 + (intensity / 10.0))
+
+        # --- 2. CONTEXTUAL THRESHOLDING ---
+        # Higher UBR = Lower threshold for mismatch to be considered 'Suspicious'
+        # A low-risk individual might need a 4.0 mismatch, whereas an Offshore-Corp triggers at 1.5
+        effective_mismatch_trigger = max(1.5, 4.0 - (Total_Behavioral_Risk * 0.3))
+
+        # --- 3. MULTI-PRONGED DETECTION TRIGGERS ---
+        
+        # Trigger A: Behavioral-Nexus Collision
+        # High intensity + a significant mismatch for that specific profile
+        is_nexus_anomaly = (intensity > 1.8 and nexus_mismatch_score > effective_mismatch_trigger)
+
+        # Trigger B: High-Risk Profile Activity
+        # If the profile is already extreme (High UBR), even moderate intensity is flagged
+        is_high_risk_activity = (Total_Behavioral_Risk > 6.5 and intensity > 1.2)
+
+        # Trigger C: Topological Obfuscation (2026 GNN Standard)
+        # Mule clusters or high rail switching in non-nexus transactions
+        is_obfuscation_red_flag = (topo.get('mule_cluster_density', 0) > 0.75) or \
+                                   (chan.get('rail_switch_intensity', 0) > 3.0)
+
+        # --- 4. FINAL LABEL ASSIGNMENT ---
+        if is_nexus_anomaly or is_high_risk_activity or is_obfuscation_red_flag:
+            current_label = 1
+        else:
+            current_label = 0
+     
+
+
+
+        # --- 1. DYNAMIC RISK SCORE (DRS) ---
+        r_div = opt_overrides.get(f"{pfx}risk_int_div", 10.0)
+        dynamic_risk = Total_Behavioral_Risk * (1.0 + (intensity / r_div))
+
+        # --- 2. CONTEXTUAL THRESHOLDING (OPTIMIZED) ---
+        m_floor = opt_overrides.get(f"{pfx}mismatch_floor", 1.5)
+        m_int   = opt_overrides.get(f"{pfx}mismatch_int", 4.0)
+        m_slope = opt_overrides.get(f"{pfx}mismatch_slope", 0.3)
+        
+        effective_mismatch_trigger = max(m_floor, m_int - (Total_Behavioral_Risk * m_slope))
+
+        # --- 3. MULTI-PRONGED DETECTION TRIGGERS ---
+        
+        # Trigger A: Behavioral-Nexus Collision
+        n_int_limit = opt_overrides.get(f"{pfx}nexus_int_limit", 1.8)
+        is_nexus_anomaly = (intensity > n_int_limit and nexus_mismatch_score > effective_mismatch_trigger)
+
+        # Trigger B: High-Risk Profile Activity
+        ubr_limit = opt_overrides.get(f"{pfx}high_risk_ubr_limit", 6.5)
+        hr_int_limit = opt_overrides.get(f"{pfx}high_risk_int_limit", 1.2)
+        is_high_risk_activity = (Total_Behavioral_Risk > ubr_limit and intensity > hr_int_limit)
+
+        # Trigger C: Topological Obfuscation (Direct Overrides)
+        mule_val   = opt_overrides.get(f"{pfx}mule_density_f", topo.get('mule_cluster_density', 0))
+        mule_limit = opt_overrides.get(f"{pfx}mule_density_limit", 0.75)
+        
+        rail_val   = opt_overrides.get(f"{pfx}rail_switch_f", chan.get('rail_switch_intensity', 0))
+        rail_limit = opt_overrides.get(f"{pfx}rail_switch_limit", 3.0)
+        
+        is_obfuscation_red_flag = (mule_val > mule_limit) or (rail_val > rail_limit)
+
+        # --- 4. FINAL LABEL ASSIGNMENT ---
+        if is_nexus_anomaly or is_high_risk_activity or is_obfuscation_red_flag:
+            current_label = 1
+        else:
+            current_label = 0
+
+        
+        
+        # Economic Sensibility: Revenue to Velocity Cap prevents impossible volume
+        Nexus_Multiplier = min((EntityTypeFactor * RiskFactor * NationalityFactor * ActivityFactor), econ['revenue_to_velocity_cap'])
+        n_tx = max(3, int(cfg['n_tx_base'] * intensity * Nexus_Multiplier))
+
+
+
+        
+        # --- 1. OPTIMIZED REVENUE & NEXUS CAPS ---
+        # Note: We reuse optimized Block 1 factors: entity_f, risk_f, nationality_f, activity_f
+        # We optimize the CAP and the scaling factor to prevent impossible volumes
+        rev_cap = opt_overrides.get(f"{pfx}revenue_cap_f", econ.get('revenue_to_velocity_cap', 5.0))
+        n_mult_base = opt_overrides.get(f"{pfx}nexus_multiplier_f", 1.0)
+        
+        # Nexus_Multiplier calculation using optimized factors
+        Nexus_Multiplier = min(
+            (entity_f * risk_f * nationality_f * activity_f * n_mult_base), 
+            rev_cap
+        )
+
+        # --- 2. OPTIMIZED TRANSACTION VOLUME ---
+        # Replacing hardcoded 3 and cfg['n_tx_base']
+        n_floor = opt_overrides.get(f"{pfx}n_tx_floor_opt", 3)
+        n_base  = opt_overrides.get(f"{pfx}n_tx_base_opt", cfg.get('n_tx_base', 10))
+        vol_scale = opt_overrides.get(f"{pfx}nexus_vol_scale", 1.0)
+
+        n_tx = max(int(n_floor), int(n_base * intensity * Nexus_Multiplier * vol_scale))
+
+        
+        t_prev = anchor
+
+
+        # Now our call inside def generate_events_from_params will run perfectly:
+        evt_payload = extreme_value_theory(
+            tx_window, 
+            scenario_type="biz_flag_non_nexus",
+            #threshold_pct=trial.suggest_float("bnn_threshold_pct", 90, 99),
+            #confidence_level=trial.suggest_float("bnn_confidence_level", 0.99, 0.9999),
+            #sample_n=trial.suggest_int("bnn_sample_n", 3, 15)
+
+            threshold_pct=opt_overrides.get(f"{pfx}evt_threshold_pct", 95.0),
+            confidence_level=opt_overrides.get(f"{pfx}evt_confidence", 0.995),
+            sample_n=int(opt_overrides.get(f"{pfx}evt_sample_n", 10)
+            
+        )        
+
+        # --- PRE-LOOP: Define Behavioral Strategy & Access EVT ---
+        nexus_data = evt_payload["biz_flag_non_nexus"]["high_tail_outliers"]
+        evt_params = nexus_data["params"]
+        
+        # Bayesian Strategy: 'Mechanical Shadow Revenue'
+        # Shifting mean up pushes the revenue facade closer to the 'economic cap'
+        nexus_m_shift = trial.suggest_float("bnn_nexus_revenue_shift", 1.05, 1.4) 
+        # Sigma contraction simulates fixed-invoice scripting
+        nexus_s_scale = trial.suggest_float("bnn_nexus_invoice_precision", 0.2, 0.6)
+
+        
+        # --- 2. BAYESIAN STRATEGY: 'Mechanical Shadow Revenue' ---
+        # Replacing bnn_nexus_revenue_shift and bnn_nexus_invoice_precision
+        nexus_m_shift = opt_overrides.get(f"{pfx}str_revenue_shift", 1.2) 
+        nexus_s_scale = opt_overrides.get(f"{pfx}str_invoice_precision", 0.4)
+
+        
+        lower_bound = cfg['amt_min']
+        upper_bound = cfg['amt_max'] * intensity # Global cap for this entity
+
+        # 3. Global System Bounds (Optimized)
+        # Replacing cfg['amt_min'] and cfg['amt_max'] with multipliers
+        lower_bound = opt_overrides.get(f"{pfx}amt_min_opt", cfg.get('amt_min', 10.0))
+
+        # We optimize the 'intensity' scaling of the upper bound
+        upper_bound_base = cfg.get('amt_max', 5000.0)
+        u_scale_f = opt_overrides.get(f"{pfx}amt_max_scale_f", 1.0)
+        upper_bound = upper_bound_base * intensity * u_scale_f
+
+
+        # --- 1. MISSING FOUNDATIONAL LOOKUPS (RE-SYNCED) ---
+        # Grounding the records for Block 2 and Block 1 overrides
+        wealth_decay_factor = opt_overrides.get(f"{pfx}decay_wealth_f", 
+                                                econ.get('velocity_decay_on_low_wealth', 1.0))
+        #timing_base_opt     = opt_overrides.get(f"{pfx}timing_base_f", multipliers.get('timing_base', 12.0))
+        
+        for _ in range(n_tx):
+            # Economic Sensibility: Balance Retention Floor (residue)
+            #amt = round(np.random.uniform(cfg['amt_min'], cfg['amt_max']) * intensity * Nexus_Multiplier * (1 - econ['balance_retention_ratio']), 2)
+
+            # 1. Base Flow Calculation (Traditional baseline)
+            #base_flow = (cfg['amt_min'] + (cfg['amt_max'] - cfg['amt_min']) / 2) * intensity * Nexus_Multiplier * (1 - econ['balance_retention_ratio'])
+
+            # 1. Use the EVT threshold as the base for Non-Nexus Capital Flight
+            # This ensures every 'Flag' starts at the 90th/95th percentile of real data
+            base_flow = evt_params["threshold_u"] * intensity * nexus_m_shift
+            
+            # --- 1. OPTIMIZED BASE FLOW ---
+            f_scale = opt_overrides.get(f"{pfx}flow_scale_f", 1.0)
+            base_flow = evt_params["threshold_u"] * intensity * nexus_m_shift * f_scale
+            
+
+            # --- 2026 HYBRID AMOUNT LOGIC ---
+            # IF: EVT for High Intensity Non-Nexus Settlement (Capital Flight Signature)
+            
+            #if evt_params["sigma_scale"] > 0 and (intensity > 2.5 or actor['RiskProfile'] == "High"):
+            
+            if evt_params["sigma_scale"] > 0 and (is_nexus_anomaly or actor['RiskProfile'] == 2):
+                
+                # Use total_risk_mod to expand the extreme tail spread
+                #dynamic_sigma = evt_params["sigma_scale"] * (1 + (0.1 * total_risk_mod))
+                dynamic_sigma = evt_params["sigma_scale"] * (1 + (0.1 * Total_Behavioral_Risk))
+
+                r_adj   = opt_overrides.get(f"{pfx}evt_risk_adj", 0.1)
+                s_base  = opt_overrides.get(f"{pfx}evt_sigma_base", 1.0)
+
+                dynamic_sigma = evt_params["sigma_scale"] * (s_base + (r_adj * Total_Behavioral_Risk))
+
+
+                
+                # Tail depth linked to mismatch score (The higher the mismatch, the bigger the outlier)
+                tail_depth = min(0.999, 0.4 + (nexus_mismatch_score / 10.0))
+
+                i_div   = opt_overrides.get(f"{pfx}evt_int_div", 10.0)
+                t_bas   = opt_overrides.get(f"{pfx}evt_tail_base", 0.4)
+
+                # Nexus Mismatch Score now directly influences the tail depth
+                tail_depth = min(0.999, t_bas + (nexus_mismatch_score / i_div))
+
+                
+                u_sample = np.random.uniform(0.5, tail_depth)
+
+                u_flr   = opt_overrides.get(f"{pfx}evt_uni_floor", 0.5)
+                u_sample = np.random.uniform(u_flr, tail_depth)
+
+                
+                exceedance = genpareto.ppf(u_sample, evt_params["xi_shape"], loc=0, scale=dynamic_sigma)
+                # Final amount is the baseline plus the extreme non-nexus 'settlement'
+                #amt = round(min(upper_bound * 2, base_flow + exceedance), 2)
+                amt = round( base_flow + exceedance, 2)
+
+            # ELSE: Bayesian-Tuned Shadow Revenue (Mechanical Facade Signature)
+            else:
+                # --- 3. OPTIMIZED TRUNCATED NORMAL ---                
+                tuned_mu = base_flow * nexus_m_shift
+
+                m_shift_f  = opt_overrides.get(f"{pfx}nexus_m_shift_f", 1.0)
+                tuned_mu = base_flow * nexus_m_shift * m_shift_f
+                
+                tuned_sigma = (base_flow * 0.1) * nexus_s_scale # 10% base sigma narrowed by precision
+
+                v_contract = opt_overrides.get(f"{pfx}var_contract_f", 0.1)
+                s_scale_f  = opt_overrides.get(f"{pfx}nexus_s_scale_f", 1.0)
+                tuned_sigma = (base_flow * v_contract) * nexus_s_scale * s_scale_f
+                
+                a_nex = (lower_bound - tuned_mu) / max(0.01, tuned_sigma)
+                b_nex = (upper_bound - tuned_mu) / max(0.01, tuned_sigma)
+                
+                # Use Truncated Normal for authentic but scripted amount clustering
+                amt = round(truncnorm.rvs(a_nex, b_nex, loc=tuned_mu, scale=tuned_sigma), 2)
+
+
+            
+            # Channel Diversity: Rail Hopping (mBridge, Stablecoins)
+            is_rail_hop = np.random.random() < chan['hop_diversification_prob']
+
+            # --- 2. OPTIMIZED RAIL LOGIC ---
+            hop_p = opt_overrides.get(f"{pfx}hop_prob_f", chan.get('hop_diversification_prob', 0.1))
+            is_rail_hop = np.random.random() < hop_p
+
+            
+            tx_type = np.random.choice(chan['rails']) if is_rail_hop else "WIRE-OUT"
+            
+            # Optimized rail choice vs fallback
+            if is_rail_hop:
+                tx_type = np.random.choice(chan['rails'])
+            else:
+                # We sample based on optimized direction probs
+                tx_type = np.random.choice(['CREDIT', 'DEBIT'], p=norm_probs)
+
+
+            
+            # --- 2026 NON-NEXUS DIRECTIONAL LOGIC ---
+            
+            # 1. Fetch raw weights based on EntityType (The most stable driver for Nexus risk)
+            raw_dir_weights = multipliers['tx_direction_weights'].get(actor['EntityType'], [0.5, 0.5])
+            
+            # 2. DEFENSIVE NORMALIZATION: Mandatory for Bayesian Optimization Stability
+            # Ensures probabilities sum to 1.0 even if the optimizer drifts the weights
+            norm_probs = [w / sum(raw_dir_weights) for w in raw_dir_weights]
+
+            # --- 1. OPTIMIZED DIRECTIONAL BIAS ---
+            # Optuna tunes the weights; we apply mandatory normalization for stability
+            w_credit = opt_overrides.get(f"{pfx}dir_w_credit", raw_dir_weights[0])
+            w_debit  = opt_overrides.get(f"{pfx}dir_w_debit", raw_dir_weights[1])
+            norm_probs = [w_credit / (w_credit + w_debit), w_debit / (w_credit + w_debit)]
+            
+            
+            # 3. SELECTION: Index 0: CREDIT, Index 1: DEBIT
+            #tx_type = np.random.choice(['CREDIT', 'DEBIT'], p=norm_probs)
+            
+
+            
+            tx_config = cfg.copy()
+            #tx_config['TargetRegion'] = "Sanctioned-or-High-Risk" if current_label == 1 else "Established-Nexus"
+
+            tx_config['TargetRegion'] = "Sanctioned-or-High-Risk" if current_label == 1 else "Established-Nexus"
+            tx_config['NexusJustification'] = "None-Identified" if current_label == 1 else "Trade-Related"
+            tx_config['Rail_Type'] = tx_type # Track which modern rail was used
+            
+            rows.append(_assemble_tx(acct, party_key, ref_date, t_prev, amt, tx_type, tx_config, label=current_label))
+
+            # 3D Velocity: Latency bypass for instant rails + wealth-based decay
+            v_bypass = chan['latency_bypass_multiplier'] if is_rail_hop else 1.0
+
+            # --- 4. OPTIMIZED VELOCITY & TEMPORAL CRUNCH ---
+            v_bypass = opt_overrides.get(f"{pfx}latency_bypass_f", chan.get('latency_bypass_multiplier', 1.0)) if is_rail_hop else 1.0
+            
+            w_decay = econ['velocity_decay_on_low_wealth'] if actor['ActivityLevel'] == "Low" else 1.0
+
+            
+            # Reusing Block 2 wealth_decay_factor; logic uses 'Low' index (actor['ActivityLevel'] == 0)
+            # --- 3. OPTIMIZED TEMPORAL CRUNCH ---
+            # Using the Numeric Index (0 = Low) as endorsed
+            w_decay = wealth_decay_factor if actor['ActivityLevel'] == 0 else 1.0
+
+            
+            raw_gap = cfg.get('tx_gap_days', 1.0)
+            #safe_gap = max(0.1, float(raw_gap)) * v_bypass * w_decay
+            #t_prev += timedelta(days=np.random.exponential(scale=safe_gap / intensity))
+
+            # Suggested modification for 2026 optimization
+            #risk_compression = 1.0 / total_risk_mod
+
+            # 2026 Production Update: Total_Behavioral_Risk now drives the temporal 'crunch'
+            risk_compression = 1.0 / Total_Behavioral_Risk
+
+            
+            safe_gap = max(0.01, float(raw_gap)) * v_bypass * w_decay * risk_compression
+
+            g_floor = opt_overrides.get(f"{pfx}gap_floor_opt", 0.01)
+            safe_gap = max(g_floor, float(raw_gap)) * v_bypass * w_decay * risk_compression
+
+            
+            t_prev += timedelta(days=np.random.exponential(scale=safe_gap / intensity))
+            
+            jitter_max = 30 if intensity > 2.5 else 360
+
+            # --- 5. OPTIMIZED JITTER ---            
+            j_max_s = int(opt_overrides.get(f"{pfx}jitter_max_susp", 30))
+            j_max_n = int(opt_overrides.get(f"{pfx}jitter_max_norm", 360))
+            j_thresh = opt_overrides.get(f"{pfx}jitter_int_threshold", 2.5) # Replaces 2.5
+            # Logic uses optimized intensity threshold and boolean label check
+            jitter_max = j_max_s if (intensity > j_thresh or current_label) else j_max_n
+            
+            
+            t_prev += timedelta(minutes=np.random.randint(5, jitter_max))
+
+            j_min = int(opt_overrides.get(f"{pfx}jitter_min_opt", 5))
+            t_prev += timedelta(minutes=np.random.randint(j_min, max(j_min + 1, jitter_max)))
+
+        # -----------------------------------------------
+        # 6. MICRO-TRANSACTIONS (Updated with label)
+        # -----------------------------------------------
+        #rows.extend(_generate_micro_tx(t_prev, amt, cfg, ref_date=ref_date, label=current_label))
+
