@@ -1846,3 +1846,611 @@ def generate_events_from_params(acct, ref_date, anchor, intensity, params, party
 
     
     
+    elif scenario_type == "layering":
+        
+        cfg = scenario_config['layering']
+        dw = cfg['demographics']
+
+        # 1. Sample demographics (The Critical Handshake)
+        entity_type = random.choices(list(dw['entity_type_weights'].keys()), weights=list(dw['entity_type_weights'].values()))[0] ## Here is the missing line: Required for lookup
+        risk_score = random.choices(list(dw['risk_score_weights'].keys()), weights=list(dw['risk_score_weights'].values()))[0] ## Here is the missing line: Required for risk logic
+        nationality = random.choices(list(dw['nationality_weights'].keys()), weights=list(dw['nationality_weights'].values()))[0] ## Here is the missing line: Required for offshore gap logic
+        pep_status = random.random() < dw['pep_status_prob']
+        industry = random.choice(dw.get('industry_options', ['other'])) if entity_type == "corporate" else None
+        
+        # --- 0. EXTRACT 3D PARAMETERS ---
+        topo, chan, econ = cfg['network_topology'], cfg['channel_config'], cfg['economic_sensibility']
+
+        # --- 2. STREAMLINED 3D RISK MODIFIER ---
+        # Consolidates Topology (Centrality), Diversity (Switching), and Economic (Escalation)
+        total_risk_mod = (topo['centrality_boost'] if risk_score == "high" else 1.0) * \
+                         (chan['rail_switch_intensity'] / 2.0) * \
+                         (econ['staged_escalation_factor'] if risk_score != "low" else 1.0)
+
+
+        # Helper function to handle flattened dictionary from Bayesian Optimization
+        def get_factor(source, actor_val):
+            # If it's the expected dict, do a lookup
+            if isinstance(source, dict):
+                return source.get(str(actor_val), 1.0)
+            # If it's a flattened number (like your debug showed), use it directly
+            if isinstance(source, (int, float)):
+                return float(source)
+            return 1.0
+            
+        
+        # --- THE 2026 LAYERING BRIDGE ---
+        # 1. Align Actor with the "Structuring" Style (0, 1, 2 indices)
+        actor = {
+            "EntityType":  0 if entity_type == "individual" else (1 if entity_type == "sme" else 2),
+            "RiskScore":   0 if risk_score == "low" else (1 if risk_score == "medium" else 2),
+            "Nationality": 0 if nationality == "domestic" else (1 if nationality == "mid-risk" else 2),
+            "PEP":         1 if pep_status else 0
+        }
+
+
+
+
+        def dynamic_sample(field_name, sub_path='demographics'):
+            """
+            Categorical sampler that handles weight dictionaries and Optuna overrides.
+            """
+            prob_key = f"{scenario_type}_{field_name}_probs"
+            
+            # Layering uses cfg['demographics'], aliased as 'dw'
+            # Use clean key (e.g., 'industry_weights') for the static config lookup
+            clean_key = f"{field_name}_weights"
+            
+            # 1. Get baseline weights from demographics (dw)
+            # Extract .values() if it's a dict (individual weights are often named)
+            baseline_dict = dw.get(clean_key, {})
+            default_probs = list(baseline_dict.values()) if isinstance(baseline_dict, dict) else baseline_dict
+        
+            # 2. Prioritize Bayesian shifts from Optuna
+            p_vector = opt_overrides.get(prob_key, default_probs)
+            
+            return np.random.choice(len(p_vector), p=p_vector)
+
+
+        # Execution in generate_events_from_params for Layering
+        actor = {
+            "EntityType":  dynamic_sample("entity_type"),
+            "RiskScore":   dynamic_sample("risk_score"),
+            "Nationality": dynamic_sample("nationality"),
+            "PEP":         1 if np.random.random() < opt_overrides.get(
+                               f"{scenario_type}_pep_status_prob", 
+                               dw.get('pep_status_prob', 0.05)
+                           ) else 0,
+                           
+            # --- NEW: INDUSTRY VARIATION ---
+            # We sample industry index (0, 1, 2...) from optimized weights
+            "Industry":    dynamic_sample("industry")
+        }
+
+
+
+        # 2. Compound Multipliers (Now BO can tune these via trial.suggest_float)
+        Entity_f = get_factor(df_cfg.get('EntityType'), actor['EntityType'])
+        Risk_f   = get_factor(df_cfg.get('RiskScore'), actor['RiskScore'])
+        Juris_f  = get_factor(df_cfg.get('Nationality'), actor['Nationality'])
+        PEP_f    = get_factor(df_cfg.get('PEP'), actor['PEP'])
+
+        # Add this line before Static_Risk calculation
+        # Use the same 'industry' variable you sampled in the Handshake
+        industry_idx = dw.get('industry_options', []).index(industry) if industry in dw.get('industry_options', []) else 3        Industry_f = get_factor(df_cfg.get('Industry'), industry_idx)
+
+
+        Static_Risk = Entity_f * Juris_f * PEP_f * Industry_f
+
+
+
+
+        # --- RECONCILED LOOKUPS (LAYERING) ---
+        # 1. Check opt_overrides for a Bayesian suggestion (e.g., 'layering_Entity_f')
+        # 2. Fall back to get_factor(df_cfg...) if no suggestion exists
+        
+        Entity_f   = opt_overrides.get(f"{scenario_type}_Entity_f", 
+                                       get_factor(df_cfg.get('EntityType'), actor['EntityType']))
+        
+        Risk_f     = opt_overrides.get(f"{scenario_type}_Risk_f", 
+                                       get_factor(df_cfg.get('RiskScore'), actor['RiskScore']))
+        
+        Juris_f    = opt_overrides.get(f"{scenario_type}_Juris_f", 
+                                       get_factor(df_cfg.get('Nationality'), actor['Nationality']))
+        
+        PEP_f      = opt_overrides.get(f"{scenario_type}_PEP_f", 
+                                       get_factor(df_cfg.get('PEP'), actor['PEP']))
+        
+        # Industry Lookup: Uses the index already stored in actor['Industry'] 
+        # Placeholder -1 is handled by get_factor returning 1.0
+        Industry_f = opt_overrides.get(f"{scenario_type}_Industry_f", 
+                                       get_factor(df_cfg.get('Industry'), actor['Industry']))
+        
+        # Final Product
+        Static_Risk = Entity_f * Risk_f * Juris_f * PEP_f * Industry_f
+
+
+
+        # 3. The 2026 Layering "Total_Behavioral_Risk" Bridge
+        # This now matches the complexity of your Structuring scenario
+        # Static/Demographic Foundation
+        
+        # Behavioral/Economic Integration
+        # rail_switch_intensity and staged_escalation_factor act as 'Complexity Multipliers'
+        Total_Behavioral_Risk = (Static_Risk) * \
+                                (topo['centrality_boost'] if risk_score == "high" else 1.0) * \
+                                (chan['rail_switch_intensity'] / 2.0) * \
+                                (econ['staged_escalation_factor'])
+
+
+        # --- 1. TOTAL BEHAVIORAL RISK (Reconciled) ---
+        # Sourcing hardcoded: topo centrality (1.0 fallback), rail divisor (2.0), escalation
+        # Now optimizing the rail_switch_intensity (Prior: chan['rail_switch_intensity'])
+        rail_switch_intensity = opt_overrides.get(f"{scenario_type}_rail_switch_int", chan.get('rail_switch_intensity', 1.0))
+        rail_div        = opt_overrides.get(f"{scenario_type}_rail_div_factor", 2.0)
+        centrality_boost         = opt_overrides.get(f"{scenario_type}_centrality_boost", 1.0 if risk_score == "high" else 1.0)
+        staged_escalation_factor      = opt_overrides.get(f"{scenario_type}_staged_escalation_f", econ.get('staged_escalation_factor', 1.0))
+        
+        Total_Behavioral_Risk = (Static_Risk) * centrality_boost * (rail_switch_intensity / rail_div) * staged_escalation_factor
+
+
+        # --- STANDALONE INTENSITY CALCULATION ---
+        # This ensures structural risk (3D) drives the behavioral signal
+        #if np.random.random() < 0.30:
+            #intensity = np.random.uniform(2.0, 4.0) * total_risk_mod
+        #else:
+            # Baseline intensity still reflects 50% of the structural risk
+            #intensity = 1.0 * (total_risk_mod * 0.5)
+        
+        # 2026 Safeguard: Cap intensity to prevent mathematical overflow in amt logic
+        #intensity = max(0.5, min(8.0, round(intensity, 2)))
+
+
+        # --- 2026 ENHANCED INTENSITY CALCULATION ---
+        # Total_Behavioral_Risk now acts as the 'Primary Engine' for all behavioral signals
+        if np.random.random() < 0.30:
+            # 30% chance of a high-intensity 'Criminal Burst' scaled by structural risk
+            intensity = np.random.uniform(2.0, 4.0) * Total_Behavioral_Risk
+        else:
+            # Baseline intensity reflects 50% of the risk, ensuring 'High-Risk Normal' behavior
+            intensity = 1.0 * (Total_Behavioral_Risk * 0.5)
+
+        # 2026 Safeguard: Cap intensity to prevent mathematical overflow in amt logic
+        intensity = max(0.5, min(8.0, round(intensity, 2)))
+        
+
+
+        # --- 2026 ENHANCED INTENSITY CALCULATION (Reconciled) ---
+        # Sourcing hardcoded: 0.30 chance, 2.0-4.0 burst, 0.5 norm scale
+        burst_p    = opt_overrides.get(f"{scenario_type}_burst_p", 0.30)
+        burst_low  = opt_overrides.get(f"{scenario_type}_burst_low", 2.0)
+        burst_high = opt_overrides.get(f"{scenario_type}_burst_high", 4.0)
+        norm_scale = opt_overrides.get(f"{scenario_type}_norm_scale", 0.5)
+
+        if np.random.random() < burst_p:
+            # 30% chance (tunable) of a high-intensity 'Criminal Burst'
+            intensity = np.random.uniform(burst_low, burst_high) * Total_Behavioral_Risk
+        else:
+            # Baseline intensity reflects scaled risk
+            intensity = 1.0 * (Total_Behavioral_Risk * norm_scale)
+
+        # 2026 Safeguards: Sourcing 0.5, 8.0, and round to 2
+        int_floor   = opt_overrides.get(f"{scenario_type}_int_floor", 0.5)
+        int_ceiling = opt_overrides.get(f"{scenario_type}_int_ceiling", 8.0)
+        
+        # Capping intensity to prevent mathematical overflow
+        intensity = max(int_floor, min(int_ceiling, round(intensity, 2)))
+
+
+
+        # 2. COMPOUND HOPS (The Path Signal)
+        # We multiply factors to reach "huge" path lengths
+        hop_mult = (dw['n_hops_multiplier'].get(entity_type, 1.0) * 
+                    (dw['n_hops_multiplier']['high_risk'] if risk_score == "high" else 1.0))
+        
+        n_hops = max(3, int(cfg['n_hops_base'] * intensity * hop_mult))
+
+        # --- 3. COMPOUND HOPS (The Path Signal) ---
+        # Sourcing hardcoded: 3 (min hops), 1.0 (baseline multiplier)
+        hop_min       = int(opt_overrides.get(f"{scenario_type}_hop_min", 3))
+        hop_base_mult = opt_overrides.get(f"{scenario_type}_hop_base_mult", 1.0)
+
+        hop_mult = (dw['n_hops_multiplier'].get(entity_type, hop_base_mult) * 
+                    (dw['n_hops_multiplier']['high_risk'] if risk_score == "high" else hop_base_mult))
+        
+        n_hops = max(hop_min, int(cfg['n_hops_base'] * intensity * hop_mult))
+
+
+        # Intensity is now a product of baseline randomness and the 3D risk modifier
+        if (np.random.random() > (1.8 / total_risk_mod)) or (n_hops > 6) or (risk_score == "high" and intensity > 1.4):
+        
+            current_label = 1 
+        else:
+            current_label = 0
+
+
+        # --- 4. LABEL ASSIGNMENT (Reconciled) ---
+        # 1. Sourcing the risk divisor (Original: 1.8)
+        label_risk_div    = opt_overrides.get(f"{scenario_type}_label_risk_div", 1.8)
+        
+        # 2. Sourcing the hop count limit (Original: 6)
+        hop_threshold     = opt_overrides.get(f"{scenario_type}_hop_threshold", 6)
+        
+        # 3. Sourcing the high-risk intensity trigger (Original: 1.4)
+        label_trigger_int = opt_overrides.get(f"{scenario_type}_label_trigger_int", 1.4)
+        
+        # Execution of the multi-trigger labeling logic
+        if (np.random.random() > (label_risk_div / Total_Behavioral_Risk)) or \
+           (n_hops > hop_threshold) or \
+           (risk_score == "high" and intensity > label_trigger_int):
+        
+            current_label = 1 
+        else:
+            current_label = 0
+
+
+
+        # 3. COMPOUND AMOUNTS (The Volume Signal)
+        amt_mult = dw['amt_multiplier'].get("default", 1.0)
+        if entity_type == "corporate" and industry == "finance":
+            amt_mult *= dw['amt_multiplier']['corporate_finance']
+        elif entity_type == "SME":
+            amt_mult *= dw['amt_multiplier']['SME']
+        if pep_status:
+            amt_mult *= dw['amt_multiplier']['PEP']
+
+        # Use truncnorm for authentic initial amount
+        mu_amt = cfg['amt_min'] * amt_mult * intensity
+        sigma_amt = (cfg['amt_max'] - cfg['amt_min']) / 4
+        a, b = (cfg['amt_min'] - mu_amt) / sigma_amt, (cfg['amt_max']*amt_mult*2 - mu_amt) / sigma_amt
+        base_amount = truncnorm.rvs(a, b, loc=mu_amt, scale=sigma_amt)
+
+
+        # --- 3. COMPOUND AMOUNTS (The Volume Signal) ---
+        # Sourcing hardcoded: 1.0 (default mult), 4.0 (sigma divisor), 2.0 (upper bound scale)
+        amt_mult_base = opt_overrides.get(f"{scenario_type}_amt_mult_base", 1.0)
+        amt_sigma_div = opt_overrides.get(f"{scenario_type}_amt_sigma_div", 4.0)
+        amt_max_scale = opt_overrides.get(f"{scenario_type}_amt_max_scale", 2.0)
+
+        amt_mult = dw['amt_multiplier'].get("default", amt_mult_base)
+        if entity_type == "corporate" and industry == "finance":
+            amt_mult *= dw['amt_multiplier']['corporate_finance']
+        elif entity_type == "SME":
+            amt_mult *= dw['amt_multiplier']['SME']
+        if pep_status:
+            amt_mult *= dw['amt_multiplier']['PEP']
+
+        # Use truncnorm for authentic initial amount
+        mu_amt = cfg['amt_min'] * amt_mult * intensity
+        sigma_amt = (cfg['amt_max'] - cfg['amt_min']) / amt_sigma_div
+
+        # Boundary calculation for truncnorm
+        a = (cfg['amt_min'] - mu_amt) / sigma_amt
+        b = (cfg['amt_max'] * amt_mult * amt_max_scale - mu_amt) / sigma_amt
+        base_amount = truncnorm.rvs(a, b, loc=mu_amt, scale=sigma_amt)
+
+
+        # 4. GENERATE INTERMEDIARY LAYERS
+        # --- 3. GENERATE LAYERS (Topology + Diversity Implementation) ---
+        #t_prev = anchor
+        # active_funds list implements NETWORK TOPOLOGY (Branching)
+        #active_funds = [{"amt": base_amount, "time": t_prev}]
+
+        # --- 2026 CONSTRUCTIVE FIX: MACRO-ANCHOR OFFSET ---
+        # Instead of starting exactly at 'anchor', we add a small initial jitter
+        # that is SHORTER for high-intensity/high-risk actors (Urgency)
+        start_jitter = np.random.uniform(0, 12.0) / (intensity * max(0.5, total_risk_mod))
+        t_start = anchor + timedelta(hours=start_jitter)
+
+        # --- 4. MACRO-ANCHOR OFFSET (The Urgency Signal) ---
+        # Sourcing hardcoded: 12.0 hours max jitter, 0.5 urgency floor
+        jitter_base  = opt_overrides.get(f"{scenario_type}_jitter_base", 12.0)
+        urgency_floor = opt_overrides.get(f"{scenario_type}_urgency_floor", 0.5)
+
+        # High-intensity/High-risk actors move faster (shorter jitter)
+        start_jitter = np.random.uniform(0, jitter_base) / (intensity * max(urgency_floor, Total_Behavioral_Risk))
+        t_start = anchor + timedelta(hours=start_jitter)
+                                     
+        # active_funds now starts with the jittered time
+        active_funds = [{"amt": base_amount, "time": t_start}]
+
+        # Now our call inside def generate_events_from_params will run perfectly:
+        evt_payload = extreme_value_theory(
+            tx_window, 
+            scenario_type="layering",
+            threshold_pct=trial.suggest_float("layer_threshold_pct", 90, 99),
+            confidence_level=trial.suggest_float("layer_confidence_level", 0.99, 0.9999),
+            sample_n=trial.suggest_int("layer_sample_n", 3, 15)
+        )
+
+
+        # --- 1. EVT RETROFIT: GPD-Driven Extreme Value Sampling ---
+        # Sourcing from opt_overrides (Suggested Upstream in Objective)
+        # No Enqueue used for 'layer_' parameters to allow pure discovery
+        l_threshold = opt_overrides.get(f"{scenario_type}_layer_threshold_pct", 95.0)
+        l_conf      = opt_overrides.get(f"{scenario_type}_layer_confidence_level", 0.999)
+        l_sample    = int(opt_overrides.get(f"{scenario_type}_layer_sample_n", 5))
+
+        evt_payload = extreme_value_theory(
+            tx_window, 
+            scenario_type="layering",
+            threshold_pct=l_threshold,
+            confidence_level=l_conf,
+            sample_n=l_sample
+        )
+
+        # 1. Access the EVT Params from the pre-computed payload
+        layering_data = evt_payload["layering"]["high_tail_outliers"]
+        evt_params = layering_data["params"]
+
+        # suggestion: define upper_bound globally from config to prevent NameError
+        lower_bound = cfg['amt_min']
+        upper_bound = cfg['amt_max'] 
+
+        # SUGGESTED BAYESIAN STRATEGY: Define once to ensure entity consistency
+        lay_m_shift = trial.suggest_float("layer_mean_retention", 0.98, 1.0)
+        lay_s_scale = trial.suggest_float("layer_sigma_precision", 0.2, 0.5)
+
+        # --- 3. BAYESIAN STRATEGY: Fund Retention & Precision ---
+        # These determine how much money is "kept" vs "passed on" in the layers
+        lay_m_shift = opt_overrides.get(f"{scenario_type}_layer_mean_retention", 0.99)
+        lay_s_scale = opt_overrides.get(f"{scenario_type}_layer_sigma_precision", 0.3)
+
+        # 4. GENERATE INTERMEDIARY LAYERS
+        rows = []
+        for d in range(n_hops):
+            next_layer_funds = []
+            for fund in active_funds:
+
+                # --- 1. VELOCITY & GAP COMPRESSION ---
+                # Sourcing hardcoded: diversification prob, bypass mult, decay mult
+                hop_div_p      = opt_overrides.get(f"{scenario_type}_hop_div_p", chan.get('hop_diversification_prob', 0.2))
+                lat_bypass_f   = opt_overrides.get(f"{scenario_type}_lat_bypass_f", chan.get('latency_bypass_multiplier', 1.0))
+                vel_decay_indiv = opt_overrides.get(f"{scenario_type}_vel_decay_indiv", econ.get('velocity_decay_on_low_wealth', 1.0))
+                
+                # CHANNEL DIVERSITY: Rail hopping vs legacy
+                is_rail_hop = random.random() < chan['hop_diversification_prob']
+                v_bypass = chan['latency_bypass_multiplier'] if is_rail_hop else 1.0
+                
+                # ECONOMIC SENSIBILITY: Velocity decay based on actor wealth/type
+                w_decay = econ['velocity_decay_on_low_wealth'] if entity_type == "individual" else 1.0
+
+                is_rail_hop = np.random.random() < hop_div_p
+                v_bypass = lat_bypass_f if is_rail_hop else 1.0
+                w_decay = vel_decay_indiv if entity_type == "individual" else 1.0
+
+
+                gap_adj = dw['gap_compression'].get(entity_type, 1.0) * v_bypass * w_decay
+                
+                gap_comp_base = opt_overrides.get(f"{scenario_type}_gap_comp_base", dw['gap_compression'].get(entity_type, 1.0))
+                gap_adj = gap_comp_base * v_bypass * w_decay                
+                
+                # GAP COMPRESSION: High-risk layering happens FAST (Velocity Gain)
+                
+                if nationality == "high_risk_offshore":
+                    gap_adj *= dw['gap_compression']['high_risk_offshore']
+
+
+                # --- 2026 REFINEMENT: HOLISTIC COMPRESSION ---
+                # We multiply the component 'gap_adj' by 'intensity' and 'Total_Behavioral_Risk'   #'total_risk_mod'
+                # This ensures Cat 3 (Suspicious) is significantly faster than Cat 2 (Normal)
+                #holistic_compression = gap_adj * intensity * max(0.5, total_risk_mod)
+                holistic_compression = gap_adj * intensity * max(0.5, Total_Behavioral_Risk)
+
+                # --- HOLISTIC COMPRESSION ---
+                # Sourcing hardcoded floor: 0.5
+                h_comp_floor = opt_overrides.get(f"{scenario_type}_holistic_comp_floor", 0.5)
+                holistic_compression = gap_adj * intensity * max(h_comp_floor, Total_Behavioral_Risk)
+
+                
+                #t_new = fund['time'] + timedelta(hours=float(np.random.exponential(scale=cfg['hop_gap_hours_scale'] / max(1e-6, gap_adj)   )))
+
+                # t_new now uses the full integrated risk profile
+                t_new = fund['time'] + timedelta(hours=float(
+                    np.random.exponential(scale=cfg['hop_gap_hours_scale'] / max(1e-6, holistic_compression))
+                ))
+
+                
+                # ECONOMIC SENSIBILITY: Balance retention (Mule Fee)
+                # --- CORRECTED FLOW CALCULATION ---
+                # 1. Base flow after balance retention (The "Mule Tax")
+                flow_amt = fund['amt'] * (1 - econ['balance_retention_ratio'])
+
+                # --- 2. ECONOMIC FRICTION (Flow Calculation) ---
+                # Sourcing hardcoded retention ratio
+                retention_ratio = opt_overrides.get(f"{scenario_type}_bal_retention_ratio", econ.get('balance_retention_ratio', 0.05))
+                flow_amt = fund['amt'] * (1 - retention_ratio)
+                
+                
+                # 2. Apply DECAY: High-risk paths lose more value (fees/layering costs)
+                decay_range = dw['forward_amt_decay']['high_risk'] if risk_score == "high" else dw['forward_amt_decay']['default']
+                #flow_amt *= np.random.uniform(*decay_range)
+
+                # 3. Final jitter for realistic transaction fragmentation
+                #flow_amt *= np.random.uniform(0.95, 0.99)
+
+                # Sourcing hardcoded decay ranges
+                d_low  = opt_overrides.get(f"{scenario_type}_decay_low", decay_range[0])
+                d_high = opt_overrides.get(f"{scenario_type}_decay_high", decay_range[1])
+                
+                # One single, clean uniform sample for realistic fragmentation
+                flow_amt *= np.random.uniform(d_low, d_high)
+
+
+                # --- 1. EVT SAMPLING (The Outlier Logic) ---
+                # Sourcing hardcoded: 2.5 (cutoff), 0.1 (sigma boost), 0.3 (tail floor)
+                evt_cutoff   = opt_overrides.get(f"{scenario_type}_evt_int_cutoff", 2.5)
+                evt_s_boost  = opt_overrides.get(f"{scenario_type}_evt_sigma_boost", 0.1)
+                td_floor     = opt_overrides.get(f"{scenario_type}_tail_depth_floor", 0.3)
+                ts_min       = opt_overrides.get(f"{scenario_type}_tail_depth_min", 0.5)                
+                
+                # --- 2026 HYBRID AMOUNT LOGIC ---
+                # Trigger EVT for high intensity or high-risk offshore diversions
+                #if evt_params["sigma_scale"] > 0 and (intensity > 2.5 or nationality == "high_risk_offshore"):
+
+                if evt_params["sigma_scale"] > 0 and (intensity > evt_cutoff or nationality == "high_risk_offshore"):
+                    # EVT Logic: Extreme 'Peeling' or Diversion Outliers
+                    
+                    #dynamic_sigma = evt_params["sigma_scale"] * (1 + (0.1 * total_risk_mod))   
+                    dynamic_sigma = evt_params["sigma_scale"] * (1 + (0.1 * Total_Behavioral_Risk))
+                    
+                    dynamic_sigma = evt_params["sigma_scale"] * (1 + (evt_s_boost * Total_Behavioral_Risk))
+                    
+                    # Tail depth increases with the number of hops (staged escalation)
+                    tail_depth = min(0.998, 0.3 + (d / float(n_hops)))
+
+                    tail_depth = min(0.998, td_floor + (d / float(n_hops)))
+                    
+                    u_sample = np.random.uniform(0.5, tail_depth)
+
+                    u_sample = np.random.uniform(ts_min, tail_depth)
+                    
+                    exceedance = genpareto.ppf(u_sample, evt_params["xi_shape"], loc=0, scale=dynamic_sigma)
+                    # For layering, outliers represent 'leaked' funds or high-value diversions
+                    #amt = round(min(upper_bound, flow_amt + exceedance), 2)
+                    amt = round(flow_amt + exceedance, 2)
+                    
+                else:
+                    # Bayesian Baseline: Mechanical Intermediary Transfer
+                    # We use the pre-calculated strategy to keep amounts consistent across hops
+
+                    sigma_p   = opt_overrides.get(f"{scenario_type}_amt_tuned_sigma_p", 0.05)
+                    sigma_min = opt_overrides.get(f"{scenario_type}_amt_sigma_min", 0.01)                    
+                    
+                    tuned_mu = flow_amt * lay_m_shift
+                    
+                    tuned_sigma = (flow_amt * 0.05) * lay_s_scale # 5% baseline sigma contracted by strategy
+                    
+                    tuned_sigma = (flow_amt * sigma_p) * lay_s_scale 
+                    
+                    a_lay = (cfg['amt_min'] - tuned_mu) / max(0.01, tuned_sigma)                    
+                    b_lay = (upper_bound - tuned_mu) / max(0.01, tuned_sigma)
+
+                    a_lay = (cfg['amt_min'] - tuned_mu) / max(sigma_min, tuned_sigma)
+                    b_lay = (upper_bound - tuned_mu) / max(sigma_min, tuned_sigma)
+                    
+                    amt = round(truncnorm.rvs(a_lay, b_lay, loc=tuned_mu, scale=tuned_sigma), 2)
+                
+                
+                # 4. Update the tracker for the next hop (Critical for propagation)
+                #next_layer_funds.append({"amt": flow_amt, "time": t_new})
+
+    
+                # TX TYPE: Replaces linear weight logic with optimized weights
+                #tx_weights = dw['tx_type_weights']['high_risk_offshore'] if nationality == "high_risk_offshore" else dw['tx_type_weights']['default']
+                ###tx_type = random.choices(["WIRE", "TRANSFER", "P2P"], weights=tx_weights)[0]
+                #normalized_weights = [w / sum(tx_weights) for w in tx_weights]
+                #tx_type = random.choices(["WIRE", "TRANSFER", "P2P"], weights=normalized_weights)[0]
+
+
+                # ---------------------------------------------------------
+                # SUPERSEDING RULE: Rail-Hopping logic for 2026 AML 
+                # ---------------------------------------------------------
+                chan = cfg['channel_config']
+
+                
+                is_rail_hop = np.random.random() < chan['hop_diversification_prob']
+
+                # Using override for rail hop probability (matches chan['hop_diversification_prob'])
+                rail_p = opt_overrides.get(f"{scenario_type}_rail_p_override", chan_cfg.get('hop_diversification_prob', 0.2))
+                
+                #if is_rail_hop:
+                if np.random.random() < rail_p:
+                    # High-intensity signal: Pick a high-risk rail
+                    tx_type = np.random.choice(chan['rails'])
+                else:
+                
+                    # --- DEFENSIVE DIRECTION LOOKUP (2026 BO-SAFE) ---
+                    # 1. Determine the key based on actor demographics
+                    prob_key = "high_risk_offshore" if nationality == "high_risk_offshore" else ("corporate" if entity_type == "corporate" else "default")
+                    
+                    # 2. Fetch raw weights (which might be raw BO outputs)
+
+                    # Change this:
+                    #raw_weights = dir_map[prob_key]
+                    
+                    # To this:
+                    raw_weights = dw['dir_map'][prob_key]
+
+                    # Sourcing weights: Prioritize Optuna shifts (e.g., 'layering_dist_dir_corporate')
+                    # Fallback to dw['dir_map'] from the static config
+                    raw_weights = opt_overrides.get(f"{scenario_type}_dist_dir_{prob_key}", dw['dir_map'][prob_key])
+
+                    
+                    # 3. NORMALIZE: Ensures probabilities sum to 1.0 even under Bayesian drift
+                    # This prevents np.random.choice from crashing if the sum is 0.999 or 1.001
+                    normalized_probs = [w / sum(raw_weights) for w in raw_weights]
+                    
+                    # 4. SELECT: CREDIT (Index 0), DEBIT (Index 1)
+                    tx_type = np.random.choice(['CREDIT', 'DEBIT'], p=normalized_probs)
+
+                
+                # Record transaction safely
+                offshore_pool = _HIGH_RISK + _ASIA + _MAJOR + ["LOCAL"]  # always non-empty
+                domestic_pool = _ASIA + _MAJOR
+                cp_pool = offshore_pool if random.random() < 0.5 else domestic_pool
+
+                # --- 4. COUNTERPARTY POOLING ---
+                cp_offshore_p = opt_overrides.get(f"{scenario_type}_cp_offshore_p", 0.5)
+                cp_pool = (_HIGH_RISK + _ASIA + _MAJOR + ["LOCAL"]) if np.random.random() < cp_offshore_p else (_ASIA + _MAJOR)
+                
+                # --- 4. NETWORK TOPOLOGY (Integrated Fan-Out / Fan-In) ---
+                
+                # --- 4. NETWORK TOPOLOGY (Reconciled) ---
+                mule_density = opt_overrides.get(f"{scenario_type}_mule_density", topo.get('mule_cluster_density', 0.4))
+                f_out_ratio  = int(opt_overrides.get(f"{scenario_type}_fan_out_ratio", topo.get('fan_out_ratio', 2)))
+                f_in_ratio   = opt_overrides.get(f"{scenario_type}_fan_in_ratio", topo.get('fan_in_ratio', 0.3))
+
+                
+                # A. FAN-OUT: Split one fund into multiple transactions at the start
+                #if d == 0 and random.random() < topo['mule_cluster_density']:
+                if d == 0 and np.random.random() < mule_density:
+                    
+                    num_splits = int(topo['fan_out_ratio']) 
+                    num_splits = int(f_out_ratio)  # DEFENSIVE: Ensures range() never crashes
+                    
+                    #split_amt = flow_amt / num_splits  # Divide the flow among branches
+                    split_amt = amt / num_splits # Divide the hybrid amt among branches
+                    
+                    for _ in range(num_splits):
+                        # Record each separate split as its own transaction
+                        rows.append(_assemble_tx(
+                            acct, party_key, ref_date, t_new, round(split_amt, 2), tx_type, cfg,
+                            pools={"country_pool_primary": cfg['country_pool_primary'], "offshore_prob": 0.5},
+                            label=current_label,
+                        ))
+                        # Track each split for the next layering hop
+                        next_layer_funds.append({"amt": split_amt, "time": t_new})
+                
+                # B. FAN-IN: Consolidate funds toward the end (Only if not already branched)
+                #elif d == n_hops - 1 and random.random() < topo['fan_in_ratio']:
+                elif d == n_hops - 1 and np.random.random() < f_in_ratio:                    
+                    # Note: Logic assumes you consolidate toward one target. 
+                    # n_hops replaces the undefined n_depth.
+                    rows.append(_assemble_tx(
+                        acct, party_key, ref_date, t_new, round(amt, 2), tx_type, cfg,
+                        pools={"country_pool_primary": cfg['country_pool_primary'], "offshore_prob": 0.5},
+                        label=current_label,
+                    ))
+                    #next_layer_funds.append({"amt": flow_amt, "time": t_new})
+                
+                # C. STANDARD HOP: Regular 1-to-1 transfer
+                else:
+                    rows.append(_assemble_tx(
+                        acct, party_key, ref_date, t_new, round(amt, 2), tx_type, cfg,
+                        label=current_label,
+                        pools={"country_pool_primary": cfg['country_pool_primary'], "offshore_prob": 0.5},
+                    ))
+                    next_layer_funds.append({"amt": amt, "time": t_new})
+                    
+
+            active_funds = next_layer_funds
+
+        # --- 5. MICRO-TRANSACTIONS (Final Integration) ---
+        #for f in active_funds:
+            # 5. MICRO-TRANSACTIONS (Final Fan-out)
+            #rows.extend(_generate_micro_tx(f['time'], f['amt'], cfg,
+                                       #pools={"country_pool_primary": cfg['country_pool_primary'],
+                                              #"offshore_pool": _HIGH_RISK, 
+                                              #"domestic_pool": _ASIA + _MAJOR}, ref_date=ref_date, label=current_label ))
+            
