@@ -2454,3 +2454,605 @@ def generate_events_from_params(acct, ref_date, anchor, intensity, params, party
                                               #"offshore_pool": _HIGH_RISK, 
                                               #"domestic_pool": _ASIA + _MAJOR}, ref_date=ref_date, label=current_label ))
             
+    
+    # ------------------ Biz Scenarios ------------------
+    
+
+    elif scenario_type == "biz_inflow_outflow_ratio":
+        # -----------------------------------------------
+        # FETCH SCENARIO CONFIG
+        # -----------------------------------------------
+        cfg = scenario_config['biz_inflow_outflow_ratio']
+        sampling_cfg = cfg['demographic_sampling']
+        multipliers = cfg['demographic_factors']  
+
+        # -----------------------------------------------
+        # 2. SYNTHETIC DEMOGRAPHICS (SAMPLING)
+        # -----------------------------------------------
+        #age = np.random.uniform(20, 70)
+        #occupation = np.random.choice(sampling_cfg['Occupation']['choices'], p=sampling_cfg['Occupation']['probabilities'])
+        #industry = np.random.choice(sampling_cfg['Industry']['choices'], p=sampling_cfg['Industry']['probabilities'])
+        #entity_type = np.random.choice(sampling_cfg['EntityType']['choices'], p=sampling_cfg['EntityType']['probabilities'])
+        #risk_score = np.random.randint(sampling_cfg['RiskScore']['low'], sampling_cfg['RiskScore']['high'] + 1)
+        #revenue_band = np.random.lognormal(mean=9, sigma=1)
+
+
+        def dynamic_sample(field_name):
+            """
+            Categorical sampler for Business Inflow/Outflow.
+            Navigates the ['probabilities'] nesting in sampling_cfg.
+            """
+            # 1. OPTUNA KEY: e.g., 'biz_inflow_outflow_ratio_Occupation_probs'
+            prob_key = f"{scenario_type}_{field_name}_probs"
+            
+            # 2. BASELINE SOURCING: Pulls from sampling_cfg['Occupation']['probabilities']
+            # This strips the scenario prefix to find the static prior
+            field_cfg = sampling_cfg.get(field_name, {})
+            default_probs = field_cfg.get('probabilities', [])
+            
+            # 3. OVERRIDE: Prioritize the Bayesian shifted vector from Optuna
+            p_vector = opt_overrides.get(prob_key, default_probs)
+            
+            # 4. SAMPLE: Returns the choice string (e.g., 'Consulting') directly
+            choices = field_cfg.get('choices', [])
+            return np.random.choice(choices, p=p_vector)
+        
+        # Execution in generate_events_from_params for biz_inflow_outflow_ratio
+        actor = {
+            # Categorical Features (Optimized via Block 0)
+            "Occupation": dynamic_sample("Occupation"),
+            "Industry":   dynamic_sample("Industry"),
+            "EntityType": dynamic_sample("EntityType"),
+            
+            # Continuous/Integer Features (Optimized via Optuna Overrides)
+            "Age":         opt_overrides.get(f"{scenario_type}_age", np.random.uniform(20, 70)),
+            
+            "RiskScore":   opt_overrides.get(f"{scenario_type}_risk_score", 
+                                             np.random.randint(sampling_cfg['RiskScore']['low'], 
+                                                               sampling_cfg['RiskScore']['high'] + 1)),
+                                             
+            "RevenueBand": opt_overrides.get(f"{scenario_type}_revenue_band", 
+                                             np.random.lognormal(mean=9, sigma=1))
+        }
+
+        # --- 2026 SCOPE RECONCILIATION (The "Safety Unpack") ---
+        # We pull these out to satisfy legacy downstream references to standalone variables
+        age          = actor["Age"]
+        occupation   = actor["Occupation"]
+        industry     = actor["Industry"]
+        entity_type  = actor["EntityType"]
+        risk_score   = actor["RiskScore"]
+        revenue_band = actor["RevenueBand"]
+
+
+        
+        # ------------------------------------------------------------
+        # 3. DEMOGRAPHICS ? NUMERICAL EFFECTS (RE-ENABLED)
+        # ------------------------------------------------------------
+        # AGE: Numerical Calculation
+        #age_f = multipliers['Age']
+        #age_factor = age_f['base'] + (age_f['offset'] - age) / age_f['divisor']
+
+        # OCCUPATION, INDUSTRY, ENTITY: String-to-Weight Lookups
+        #occupation_risk   = multipliers['Occupation'].get(occupation, 1.0)
+        #industry_factor   = multipliers['Industry'].get(industry, 1.0)
+        #entity_multiplier = multipliers['EntityType'].get(entity_type, 1.0)
+        
+        # RISK & REVENUE: Direct Scaling
+        #risk_prob_boost   = risk_score * multipliers['RiskScore_Scale']
+        #rev_factor        = min(max(revenue_band / multipliers['Revenue_Scale'], 0.5), 5.0)
+
+
+        # --- RECONCILED LOOKUPS (Bayesian Override vs. Config Fallback) ---
+        
+        # 1. AGE FACTOR: Optimize the base and offset
+        # Logic: age_f['base'] + (age_f['offset'] - age) / age_f['divisor']
+        a_base = opt_overrides.get(f"{scenario_type}_Age_base", multipliers['Age']['base'])
+        a_off  = opt_overrides.get(f"{scenario_type}_Age_offset", multipliers['Age']['offset'])
+        age_factor = a_base + (a_off - age) / multipliers['Age']['divisor']
+    
+        # 2. CATEGORICAL LOOKUPS: Occupation, Industry, Entity
+        # Logic: Uses get_factor to handle Dict vs Float reconciliation
+        occupation_risk = opt_overrides.get(
+            f"{scenario_type}_Occ_f", 
+            get_factor(multipliers.get('Occupation'), occupation)
+        )
+        industry_factor = opt_overrides.get(
+            f"{scenario_type}_Industry_f", 
+            get_factor(multipliers.get('Industry'), industry)
+        )
+        entity_multiplier = opt_overrides.get(
+            f"{scenario_type}_Entity_f", 
+            get_factor(multipliers.get('EntityType'), entity_type)
+        )
+    
+        # 3. SCALING FACTORS: Risk and Revenue
+        # Risk Logic: risk_score * multipliers['RiskScore_Scale']
+        risk_f_scale = opt_overrides.get(f"{scenario_type}_Risk_f", multipliers['RiskScore_Scale'])
+        risk_prob_boost = risk_score * risk_f_scale
+
+        # --- RECONCILED REVENUE CLIPPING (Optimizing hardcoded boundaries) ---
+        
+        # 1. Fetch suggestions for boundaries (fallback to 0.5 and 5.0)
+        rev_min_bound = opt_overrides.get(f"{scenario_type}_Rev_min", 0.5)
+        rev_max_bound = opt_overrides.get(f"{scenario_type}_Rev_max", 5.0)
+        
+        # 2. Fetch suggestion for scaling denominator
+        # Revenue Logic: min(max(revenue_band / multipliers['Revenue_Scale'], 0.5), 5.0)
+        rev_f_scale = opt_overrides.get(f"{scenario_type}_Rev_f", multipliers['Revenue_Scale'])
+        
+        rev_factor = min(max(revenue_band / rev_f_scale, rev_min_bound), rev_max_bound)
+
+        
+
+        # Global Demographic Multiplier (D) - No longer 1!
+        D = occupation_risk * industry_factor * entity_multiplier * rev_factor 
+
+        # 1. Upfront 3D Parameter Extraction
+        topo, chan, econ = cfg['network_topology'], cfg['channel_config'], cfg['economic_sensibility']
+        
+        # 2. 3D RISK MODIFIER (The Third Dimension)
+        # 2026 Standard: Cluster Density, Rail Hopping, and Staged Escalation drive the Risk Mod
+        #total_risk_mod = (topo['cluster_density'] * 1.5 if topo['cluster_density'] > 0.5 else 1.0) * \
+                         #(chan['rail_hopping_intensity'] / 2.0) * \
+                         #(econ['staged_escalation_factor'] if np.random.random() < 0.2 else 1.0)
+
+        # Apply a non-zero floor to the entire product
+        total_risk_mod = max(1e-6, 
+            (topo['cluster_density'] * 1.5 if topo['cluster_density'] > 0.5 else 1.0) * \
+            (chan['rail_hopping_intensity'] / 2.0) * \
+            (econ['staged_escalation_factor'] if np.random.random() < 0.2 else 1.0)
+        )
+
+        # --- 2. THE 2026 UNIFIED BEHAVIORAL RISK (UBR) ---
+        # Merges Static Risk (D_Risk) with Dynamic Risk (Topo, Chan, Econ)
+        # We use the 'Total_Behavioral_Risk' architecture for cross-typology symmetry
+
+        # --- 1. CONSOLIDATED DEMOGRAPHIC ACTOR (D_Risk) ---
+        # We integrate the multipliers directly to create a "Static Risk Foundation"
+
+        # --- 2026 PRODUCTION-GRADE BIO RISK BRIDGE ---
+        # 1. Base Demographic Risk
+        D_Risk = (occupation_risk * industry_factor * entity_multiplier * rev_factor * age_factor)
+
+        # 2. Combined Behavioral Risk with 1e-6 Safeguard
+        # This protects against 0-value multipliers suggested by Bayesian Optimization
+        Total_Behavioral_Risk = max(1e-6, (
+            D_Risk * 
+            (topo['cluster_density'] * 1.5 if topo['cluster_density'] > 0.5 else 1.0) *
+            (chan['rail_hopping_intensity'] / 2.0) *
+            (econ['staged_escalation_factor'])
+        ))
+
+
+        # --- RECONCILED BEHAVIORAL RISK (Block 3 Integration) ---
+        
+        # 1. Cluster Density: Optimize the 1.5 multiplier
+        # Fallback remains 1.5 if Optuna hasn't reached this block yet
+        c_base = opt_overrides.get(f"{scenario_type}_cluster_density_base", topo['cluster_density'])
+        c_mult = opt_overrides.get(f"{scenario_type}_cluster_multiplier_f", 1.5)
+        c_thresh = opt_overrides.get(f"{scenario_type}_cluster_threshold", 0.5)
+        c_floor  = opt_overrides.get(f"{scenario_type}_cluster_floor", 1.0)        
+        cluster_component = c_mult if c_base > c_thresh else c_floor
+        
+        # 2. Rail Hopping: Optimize the 2.0 divisor
+        # Fallback remains 2.0
+        r_base = opt_overrides.get(f"{scenario_type}_rail_hopping_base", chan['rail_hopping_intensity'])
+        r_div = opt_overrides.get(f"{scenario_type}_rail_intensity_divisor", 2.0)
+        rail_component = r_base / r_div
+        
+        # 3. Economic Escalation: Optimize the factor from config
+        # Fallback is the raw config value
+        e_f = opt_overrides.get(f"{scenario_type}_econ_escalation_f", econ['staged_escalation_factor'])
+        
+        # 4. Final Calculation with 1e-6 Safeguard
+        Total_Behavioral_Risk = max(1e-6, (
+            D_Risk * 
+            cluster_component *
+            rail_component *
+            e_f
+        ))
+
+
+        
+        # 3. INTENSITY CALCULATION
+        # Behavior is now a direct function of the structural risk modifier
+        #intensity = np.random.uniform(2.0, 4.5) * total_risk_mod
+
+        # Restore the baseline chance for high-intensity behavior
+        base_intensity = np.random.uniform(2.0, 4.5) if np.random.random() < 0.25 else 1.0
+
+        # --- RECONCILED GENERATIVE INTENSITY (Block 4) ---
+        
+        # 1. Behavioral Mode logic
+        a_low  = opt_overrides.get(f"{scenario_type}_agg_low", 2.0)
+        a_high = opt_overrides.get(f"{scenario_type}_agg_high", 4.5)
+        a_prob = opt_overrides.get(f"{scenario_type}_agg_prob", 0.25)
+        b_norm = opt_overrides.get(f"{scenario_type}_base_normal", 1.0) # Optimized Baseline
+        
+        # Logic: Randomly choose between Aggressive distribution or Optimized Normal baseline
+        base_intensity = np.random.uniform(a_low, a_high) if np.random.random() < a_prob else b_norm
+
+        
+        intensity = base_intensity * total_risk_mod
+
+        # 1. Determine base behavioral mode (Normal vs. Aggressive)
+        #base_intensity = np.random.uniform(2.0, 4.5) if np.random.random() < 0.25 else 1.0
+        
+        # 2. Scale by the unified 2026 Risk Bridge
+        # This ensures a 'Corporate PEP' in a 'High Risk Jurisdiction' 
+        # moves money faster than a 'Low Risk Individual' even in 'Normal' mode.
+        intensity = base_intensity * Total_Behavioral_Risk
+
+        # --- 3. DYNAMIC INTENSITY & SAFEGUARDS ---
+        # BO suggests these bounds to find the "Detection Phase Transition"
+        int_floor = trial.suggest_float("bio_int_floor", 0.1, 1.0)
+        int_ceiling = trial.suggest_float("bio_int_ceiling", 5.0, 15.0)
+
+        
+        # 3. Dynamic Safeguards & Precision
+        int_floor   = opt_overrides.get(f"{scenario_type}_int_floor", 0.1)
+        int_ceiling = opt_overrides.get(f"{scenario_type}_int_ceiling", 15.0)
+        int_prec    = int(opt_overrides.get(f"{scenario_type}_int_precision", 2))
+
+        
+        # 3. Apply the BO-tuned Safeguard
+        intensity = max(int_floor, min(int_ceiling, round(intensity, 2)))
+
+        # 4. Final Intensity Clamping
+        intensity = max(int_floor, min(int_ceiling, round(intensity, int_prec)))        
+        
+        # 4. REFINED LABELING LOGIC (3D Aware)
+        # The threshold (2.0) is dynamically adjusted by the total_risk_mod
+        #if (intensity > (2.0 / total_risk_mod)) or (risk_score >= 8 and intensity > 1.5) or (industry in ['cash_heavy'] and intensity > 1.2):
+            #current_label = 1
+        #else:
+            #current_label = 0
+
+        # Dynamic Risk Score for 2026 Labeling
+        dynamic_risk = risk_score * (1 + (total_risk_mod - 1) * 0.5)
+        if (intensity > 2.2) or (dynamic_risk >= 8 and intensity > 1.5) or (topo['circularity_prob'] > 0.7):
+            current_label = 1
+        else:
+            current_label = 0
+
+        # 1. Dynamic Risk Score (2026 Refinement)
+        # Integrates the comprehensive behavioral risk into the base profile
+        dynamic_risk = risk_score * (1 + (Total_Behavioral_Risk - 1) * 0.4)
+
+
+        r_sens    = opt_overrides.get(f"{scenario_type}_risk_sensitivity_f", 0.4)
+        r_offset  = opt_overrides.get(f"{scenario_type}_risk_base_offset", 1.0)
+        r_neutral = opt_overrides.get(f"{scenario_type}_risk_neutral_floor", 1.0)
+        
+        # Refactored Formula: No hardcoded constants remain
+        dynamic_risk = risk_score * (r_offset + (Total_Behavioral_Risk - r_neutral) * r_sens)
+        
+        
+        # 2. 2026 Multi-Factor Labeling Logic
+        # Suspicious behavior is now a fusion of Intensity, Profile Risk, and Topology
+        label_conditions = [
+            (intensity > 2.5),                                  # Pure Behavioral Surge
+            (dynamic_risk >= 7.5 and intensity > 1.2),           # Risk-Proportional Anomaly
+            (topo.get('circularity_prob', 0) > 0.65),           # Network Topology (Layering)
+            (chan.get('rail_hopping_intensity', 0) > 3.0)        # Obfuscation Intensity (2026 Red Flag)
+        ]
+
+
+        # 2. Optimized Threshold Resolution
+        # Resolving variables for the Decision Matrix
+        p_int_thresh = opt_overrides.get(f"{scenario_type}_pure_intensity_thresh", 2.5)
+        prop_risk_m  = opt_overrides.get(f"{scenario_type}_proportional_risk_min", 7.5)
+        prop_int_m   = opt_overrides.get(f"{scenario_type}_proportional_int_min", 1.2)
+        
+        # Network/Channel Parameter Refactoring (Optimized vs Config)
+        circ_val    = opt_overrides.get(f"{scenario_type}_circularity_prob_base", topo.get('circularity_prob', 0))
+        circ_thresh = opt_overrides.get(f"{scenario_type}_circularity_thresh", 0.65)
+        
+        rail_val    = opt_overrides.get(f"{scenario_type}_rail_hopping_base", chan.get('rail_hopping_intensity', 0))
+        rail_thresh = opt_overrides.get(f"{scenario_type}_rail_obfuscation_thresh", 3.0)
+        
+        # 3. Final Decision Matrix (Recall-Optimized)
+        label_conditions = [
+            (intensity > p_int_thresh),                      # Pure Behavioral Surge
+            (dynamic_risk >= prop_risk_m and intensity > prop_int_m), # Risk-Proportional Anomaly
+            (circ_val > circ_thresh),                        # Network Topology (Layering)
+            (rail_val > rail_thresh)                         # Obfuscation Intensity (Red Flag)
+        ]
+
+        
+        current_label = 1 if any(label_conditions) else 0
+
+        
+        
+        # -----------------------------------------------
+        # 4. TRANSACTION GENERATION (ECONOMIC SENSIBILITY)
+        # -----------------------------------------------
+        n_tx = max(5, int(cfg.get('n_tx_base') * intensity))
+        #t_prev = ref_date - timedelta(days=np.random.uniform(25, 29))
+
+        # 1. Transaction Count Optimization
+        n_floor = int(opt_overrides.get(f"{scenario_type}_n_tx_floor", 5))
+        n_base  = opt_overrides.get(f"{scenario_type}_n_tx_base_val", cfg.get('n_tx_base', 10)) # Assuming 10 as default
+        n_tx    = max(n_floor, int(n_base * intensity))
+        
+        # --- 2026 REFINEMENT: MACRO-START OFFSET ---
+        # High-risk entities start their "Inflow-Outflow" cycle with more urgency
+        # We scale the 25-day buffer by the holistic risk
+        #start_buffer_days = np.random.uniform(20, 30) / (intensity * max(0.5, total_risk_mod)) 
+        start_buffer_days = np.random.uniform(20, 30) / (intensity * max(0.5, Total_Behavioral_Risk)) 
+
+        # 2. Temporal Buffer Optimization (Corrected to Total_Behavioral_Risk)
+        # Logic: np.random.uniform(20, 30) / (intensity * max(0.5, Total_Behavioral_Risk))
+        b_low    = opt_overrides.get(f"{scenario_type}_buffer_days_low", 20.0)
+        b_high   = opt_overrides.get(f"{scenario_type}_buffer_days_high", 30.0)
+        beh_floor = opt_overrides.get(f"{scenario_type}_behavioral_risk_floor", 0.5)
+        
+        # Applying the optimized risk modifier floor to the 2026 Risk Bridge
+        start_buffer_days = np.random.uniform(b_low, b_high) / (intensity * max(beh_floor, Total_Behavioral_Risk))
+
+
+        t_prev = ref_date - timedelta(days=start_buffer_days)
+
+
+        
+        # --- PRE-LOOP: Define the Bayesian Strategy and Bounds ---
+        
+        # 1. Define the Bayesian Strategy once to ensure entity consistency
+        # We define the 0.95 - 1.0 relationship via the Bayesian Shift
+        # This ensures the 'Mean' of the distribution is 95% to 100% of the Inflow
+        biz_m_shift = trial.suggest_float("biz_parity_shift", 0.95, 1.0)
+        
+        # We shrink the spread to create 'Mechanical Precision' (Low Entropy)
+        biz_s_scale = trial.suggest_float("biz_parity_precision", 0.1, 0.4)
+
+
+        # 3. Parity Logic (Replaces direct trial calls)
+        biz_m_shift = opt_overrides.get(f"{scenario_type}_biz_parity_shift", 0.97) # Midpoint of 0.95-1.0
+        biz_s_scale = opt_overrides.get(f"{scenario_type}_biz_parity_precision", 0.25) # Midpoint of 0.1-0.4
+
+
+        # 2. Define the global system bounds
+        lower_bound = cfg['amt_min']
+        upper_bound = cfg['amt_max']
+
+        # 4. Amount Boundary Optimization
+        lower_bound = opt_overrides.get(f"{scenario_type}_amt_min_base", cfg.get('amt_min'))
+        upper_bound = opt_overrides.get(f"{scenario_type}_amt_max_base", cfg.get('amt_max'))
+        
+        for _ in range(n_tx):
+            # ECONOMIC SENSIBILITY: Revenue Velocity Cap (Ensures volume fits profile)
+            # 2026 APAC Retail Seasonality (vol_idx) also scales the base amount
+            seasonal_boost = 1.0 + (econ['seasonal_volatility_index'] if industry == 'retail' else 0.0)
+
+            # 1. Economic Sensibility: Seasonality & Revenue Velocity
+            s_base  = opt_overrides.get(f"{scenario_type}_seasonal_boost_base", 1.0)
+            s_vol   = opt_overrides.get(f"{scenario_type}_seasonal_vol_idx", econ['seasonal_volatility_index'])
+            
+            # 2026 logic: Apply boost only if industry matches 'retail'
+            seasonal_boost = s_base + (s_vol if industry == 'retail' else 0.0)
+
+            
+            base_amt = np.random.uniform(cfg['amt_min'], cfg['amt_max']) * D * seasonal_boost
+            base_amt = min(base_amt, revenue_band * econ['revenue_to_velocity_cap'] / n_tx)
+
+            
+            # Amount calculation using optimized boundaries from Block 6 and seasonal boost from Block 7
+            # lower_bound/upper_bound/D are from previous blocks
+            base_amt = np.random.uniform(lower_bound, upper_bound) * D * seasonal_boost
+            v_cap_f = opt_overrides.get(f"{scenario_type}_rev_velocity_cap_f", econ['revenue_to_velocity_cap'])
+            
+            # Applying the Velocity Cap (Revenue Band * Cap Factor / Transaction Count)
+            base_amt = min(base_amt, (revenue_band * v_cap_f) / n_tx)
+
+            
+
+            
+            # CHANNEL DIVERSITY: Rail Hopping logic
+            is_rail_hop = np.random.random() < (0.3 * chan['rail_hopping_intensity'])
+            #tx_type = np.random.choice(chan['rails']) if is_rail_hop else "TRANSFER"
+
+            # 2. Channel Diversity: Rail Hopping logic
+            # Logic: np.random.random() < (0.3 * intensity)
+            rh_static = opt_overrides.get(f"{scenario_type}_rail_hop_prob_static", 0.3)
+            rh_intens = opt_overrides.get(f"{scenario_type}_rail_hop_intensity_f", chan['rail_hopping_intensity'])
+            
+            is_rail_hop = np.random.random() < (rh_static * rh_intens)
+
+
+            # --- 2026 HYBRID CHANNEL/RATIO LOGIC ---
+            if is_rail_hop:
+                # Use a specific high-risk rail for both sides
+                selected_rail = np.random.choice(chan['rails'])
+                in_tx_type = f"CREDIT_{selected_rail}"
+                out_tx_type = f"DEBIT_{selected_rail}"
+            else:
+                # Fallback to generic TRANSFER if not hopping rails
+                in_tx_type = "CREDIT_TRANSFER"
+                out_tx_type = "DEBIT_TRANSFER"
+            
+            # Temporal velocity bypass for instant rails
+            v_bypass = chan['settlement_latency_bypass'] if is_rail_hop else 1.0
+
+            # 1. Settlement Latency Bypass logic
+            # Logic: Use bypass if rail hopping, else fallback to baseline
+            lat_bypass = opt_overrides.get(f"{scenario_type}_latency_bypass_base", chan['settlement_latency_bypass'])
+            lat_norm   = opt_overrides.get(f"{scenario_type}_latency_bypass_fallback", 1.0)
+            
+            v_bypass = lat_bypass if is_rail_hop else lat_norm
+
+
+
+            #t_prev += timedelta(hours=float(cfg['tx_gap_hours'] * v_bypass * intensity))
+            #t_prev += timedelta(hours=float(max(1e-6, cfg['tx_gap_hours'] * v_bypass * intensity)))
+
+            
+            # High intensity and v_bypass should REDUCE the gap (increase velocity)
+            # Restoring the exponential distribution for realistic jitter
+            #gap_scale = cfg['tx_gap_hours'] / (intensity * v_bypass)
+
+            # --- 2026 REFINEMENT: HOLISTIC COMPRESSION ---
+            # We ensure BOTH intensity and Total_Behavioral_Risk drive the velocity   # total_risk_mod
+            # This creates the "Criminal Signature" needed for high F1 uplift
+            #holistic_velocity = intensity * v_bypass * max(0.5, total_risk_mod)
+            holistic_velocity = intensity * v_bypass * max(0.5, Total_Behavioral_Risk)
+
+
+            # 2. Holistic Velocity Scaling
+            # Incorporates the optimized intensity and the behavior-based risk floor
+            v_floor = opt_overrides.get(f"{scenario_type}_velocity_risk_floor", 0.5)
+            holistic_velocity = intensity * v_bypass * max(v_floor, Total_Behavioral_Risk)
+
+            gap_scale = cfg['tx_gap_hours'] / holistic_velocity
+
+            # 3. Temporal Gap Calculation
+            gap_base  = opt_overrides.get(f"{scenario_type}_tx_gap_hours_base", cfg['tx_gap_hours'])
+            gap_scale = gap_base / holistic_velocity
+
+
+            # Update t_prev with risk-weighted exponential gap
+            t_prev += timedelta(hours=float(np.random.exponential(scale=gap_scale)))
+
+            
+            # Re-insert jitter to avoid synthetic fingerprints
+            #t_prev += timedelta(minutes=np.random.randint(-30, 30))
+
+            # Jitter to avoid fingerprints
+            t_prev += timedelta(minutes=np.random.randint(-15, 15))
+
+
+            # 4. Temporal Jitter Optimization
+            # Replaces hardcoded -15 to 15 range
+            j_min = int(opt_overrides.get(f"{scenario_type}_jitter_min", -15))
+            j_max = int(opt_overrides.get(f"{scenario_type}_jitter_max", 15))
+            
+            t_prev += timedelta(minutes=np.random.randint(j_min, j_max + 1))
+
+            # Determine Inflow vs Outflow
+            anomalous_prob = 0.5
+            if np.random.rand() < anomalous_prob:
+                in_amt = base_amt * (cfg['inflow_multiplier_high'] ** intensity) * occupation_risk
+                out_amt = base_amt * (cfg['outflow_multiplier_low'] ** intensity) * industry_factor
+            else:
+                in_amt = base_amt * (cfg['inflow_multiplier_low'] ** intensity) * entity_multiplier
+                out_amt = base_amt * (cfg['outflow_multiplier_high'] ** intensity) * age_factor
+
+
+            # --- RECONCILED DUAL-LAYER MAGNITUDE SCALING (Block 8) ---
+            
+            # 1. Resolve Global Scaling Weights
+            a_prob   = opt_overrides.get(f"{scenario_type}_anomalous_prob_thresh", 0.5)
+            b_weight = opt_overrides.get(f"{scenario_type}_behavioral_weight_f", 1.0)
+            d_weight = opt_overrides.get(f"{scenario_type}_demographic_weight_f", 1.0)
+            
+            # The "Suspicion Scalar" (2026 Bridge) drives the Anomaly Magnitude
+            suspicion_scalar = Total_Behavioral_Risk * b_weight
+            
+            # 2. Optimized Multipliers
+            i_high = opt_overrides.get(f"{scenario_type}_inflow_mult_high", cfg['inflow_multiplier_high'])
+            i_low  = opt_overrides.get(f"{scenario_type}_inflow_mult_low", cfg['inflow_multiplier_low'])
+            o_high = opt_overrides.get(f"{scenario_type}_outflow_mult_high", cfg['outflow_multiplier_high'])
+            o_low  = opt_overrides.get(f"{scenario_type}_outflow_mult_low", cfg['outflow_multiplier_low'])
+            
+            # 3. Dual-Layer Amount Generation
+            # Logic: Base * (Typology Growth) * (Weighted Demographic Anchor) * (Global Suspicion)
+            if np.random.rand() < a_prob:
+                # Mode A: Occupation-anchored Inflow vs Industry-anchored Outflow
+                in_amt  = base_amt * (i_high ** intensity) * (occupation_risk * d_weight) * suspicion_scalar
+                out_amt = base_amt * (o_low ** intensity)  * (industry_factor * d_weight) * suspicion_scalar
+            else:
+                # Mode B: Entity-anchored Inflow vs Age-anchored Outflow
+                in_amt  = base_amt * (i_low ** intensity)  * (entity_multiplier * d_weight) * suspicion_scalar
+                out_amt = base_amt * (o_high ** intensity) * (age_factor * d_weight) * suspicion_scalar
+
+
+        # --- THE PYTHON IMPLEMENTATION OF MEAN TRANSLATION AND SIGMA CONTRACTION ---
+        
+            # 1. Translate the Mean Upwards 
+            # This implements your 0.95-1.0 requirement mathematically.
+            # If in_amt is 1000 and biz_m_shift is 0.97, the center of our distribution is 970.
+            tuned_mu = in_amt * biz_m_shift
+            
+
+            # 2. Shrink the Standard Deviation
+            # Start with a base variance (e.g., 2% of the amount) and contract it by our strategy (biz_s_scale)
+            tuned_sigma = (in_amt * 0.02) * biz_s_scale 
+
+
+            # Resolving the 0.02 and 0.01 hardcoded figures
+            s_coeff = opt_overrides.get(f"{scenario_type}_sigma_base_coeff", 0.02)
+            
+            # Logic: (Amount * Optimized Coeff) * Optimized Scale
+            tuned_sigma = (in_amt * s_coeff) * biz_s_scale
+
+
+            # Ensure sigma is never zero to prevent division errors
+            safe_sigma = max(0.01, tuned_sigma)
+
+            s_floor = opt_overrides.get(f"{scenario_type}_sigma_floor", 0.01)
+            safe_sigma  = max(s_floor, tuned_sigma)
+        
+            # 3. Calculate Truncation Bounds (Z-scores)
+            # This maps the global [min, max] constraints to our tuned distribution
+            a_lay = (lower_bound - tuned_mu) / safe_sigma
+            b_lay = (upper_bound - tuned_mu) / safe_sigma
+
+            # 3. Optimized Circularity Rounding
+            c_prec = int(opt_overrides.get(f"{scenario_type}_circularity_round_prec", 2))
+            
+            # ECONOMIC SENSIBILITY: Balance Retention Floor (Mule residue)
+            # NETWORK TOPOLOGY: Circularity check (U-Turn logic)
+            #if np.random.random() < topo['circularity_prob'] and current_label == 1:
+
+            # circ_val was resolved in Block 5
+            if np.random.random() < circ_val and current_label == 1:
+                
+                # Force U-Turn: Inflow and Outflow match within 5% to simulate circularity
+                #out_amt = in_amt * np.random.uniform(0.95, 1.0)
+                # 4. Generate the Amount using Truncated Normal Distribution
+                # This generates an 'out_amt' that is centered on 'tuned_mu' with 'tuned_sigma' spread
+                #out_amt = in_amt * round(truncnorm.rvs(a_lay, b_lay, loc=tuned_mu, scale=safe_sigma)
+                
+                #out_amt = round(truncnorm.rvs(a_lay, b_lay, loc=tuned_mu, scale=safe_sigma), 2)
+
+                out_amt = round(truncnorm.rvs(a_lay, b_lay, loc=tuned_mu, scale=safe_sigma), c_prec)
+
+                        
+            # Retention logic (Money must "legitimately" rest in the account)
+            #retained_amt = out_amt * econ['balance_retention_floor']
+            #final_out_amt = out_amt - retained_amt
+
+            # If circularity is detected (laundering), retention is near-zero
+            effective_retention = 0.01 if (current_label == 1 and np.random.random() < topo['circularity_prob']) else econ['balance_retention_floor']
+
+            # 1. Optimized Retention (Leakage) Calculation
+            # Logic: If circular layering, use optimized low-leakage factor; else use config floor
+            c_ret_f = opt_overrides.get(f"{scenario_type}_circular_retention_f", 0.01)
+            r_floor = opt_overrides.get(f"{scenario_type}_retention_floor_base", econ['balance_retention_floor'])
+            
+            # circ_val (circularity_prob_base) from Block 5
+            is_circular = (current_label == 1 and np.random.random() < circ_val)
+            effective_retention = c_ret_f if is_circular else r_floor
+
+
+            final_out_amt = out_amt * (1 - effective_retention)
+
+            # Record Inflow
+            #rows.append(_assemble_tx(acct, party_key, ref_date, t_prev, round(in_amt, 2), "CREDIT", cfg, label=current_label))
+            rows.append(_assemble_tx(acct, party_key, ref_date, t_prev, round(in_amt, 2), in_tx_type, cfg, label=current_label))
+            
+            # Record Outflow (Timing controlled by U-Turn threshold)
+            t_out = t_prev + timedelta(hours=np.random.uniform(2, topo['u_turn_threshold_hours']))
+
+            # 3. Optimized U-Turn Temporal Spacing
+            # Logic: timedelta(hours=np.random.uniform(2, threshold))
+            u_min    = opt_overrides.get(f"{scenario_type}_uturn_gap_min", 2.0)
+            u_max_b  = opt_overrides.get(f"{scenario_type}_uturn_gap_max_base", topo['u_turn_threshold_hours'])            
+            # t_out determines when the funds leave after arriving
+            t_out = t_prev + timedelta(hours=np.random.uniform(u_min, u_max_b)
+
+
+            #rows.append(_assemble_tx(acct, party_key, ref_date, t_out, round(final_out_amt, 2), "DEBIT", cfg, label=current_label))
+            rows.append(_assemble_tx(acct, party_key, ref_date, t_out, round(final_out_amt, 2), out_tx_type, cfg, label=current_label))
+
+
