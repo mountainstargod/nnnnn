@@ -5845,3 +5845,738 @@ def generate_events_from_params(acct, ref_date, anchor, intensity, params, party
         #rows.extend(_generate_micro_tx(t_prev, amt, cfg, ref_date=ref_date, label=current_label, pools={"country_pool_primary": pep_pool}))
 
     
+    elif scenario_type == "biz_flag_personal_to_corp":
+        # -------------------------------
+        # FETCH SCENARIO CONFIG
+        # -------------------------------
+        cfg = scenario_config['biz_flag_personal_to_corp']
+        sampling_cfg = cfg['demographic_sampling']
+        multipliers = cfg['demographic_factors']
+        corp_cfg = cfg['corporate']
+        micro_cfg = cfg['micro_params']
+    
+        # --- 0. EXTRACT 2026 3D PARAMETERS ---
+        topo, chan, econ = cfg['network_topology'], cfg['channel_config'], cfg['economic_sensibility']
+
+        # Helper function to handle flattened dictionary from Bayesian Optimization
+        def get_factor(source, actor_val):
+            # If it's the expected dict, do a lookup
+            if isinstance(source, dict):
+                return source.get(str(actor_val), 1.0)
+            # If it's a flattened number (like your debug showed), use it directly
+            if isinstance(source, (int, float)):
+                return float(source)
+            return 1.0        
+        
+        # -------------------------------
+        # 1. SYNTHETIC DEMOGRAPHICS
+        # -------------------------------
+        actor = {
+            "age": np.random.randint(*sampling_cfg['age_range']),
+            "occupation": np.random.choice(sampling_cfg['occupation']['choices'],
+                                           p=sampling_cfg['occupation']['probabilities']),
+            "income": np.random.lognormal(mean=sampling_cfg['income_lognormal']['mean'],
+                                          sigma=sampling_cfg['income_lognormal']['sigma']),
+            "entity_type": np.random.choice(sampling_cfg['entity_type']['choices'],
+                                            p=sampling_cfg['entity_type']['probabilities']),
+            "risk_profile": np.random.choice(sampling_cfg['risk_profile']['choices'],
+                                             p=sampling_cfg['risk_profile']['probabilities'])
+        }
+
+        age = actor['age']
+        occ = actor['occupation']
+        inc = actor['income']        
+
+        risk_profile = actor['risk_profile']
+        entity_type = actor['entity_type']
+        
+
+        def dynamic_sample(field_name):
+            prob_key = f"{scenario_type}_{field_name}_probs"
+            default_probs = sampling_cfg.get(field_name, {}).get('probabilities', [])
+            p_vector = opt_overrides.get(prob_key, default_probs)
+            # Returns the integer index 0, 1, 2... for downstream factor lookups
+            return np.random.choice(len(p_vector), p=p_vector)
+
+        # --- 1. SYNTHETIC DEMOGRAPHICS (FULLY OPTIMIZED) ---
+        actor = {
+            # Optimized Age Range (Falling back to the cfg [22, 66] list)
+            "age": np.random.randint(
+                opt_overrides.get(f"{scenario_type}_age_min", sampling_cfg['age_range'][0]),
+                opt_overrides.get(f"{scenario_type}_age_max", sampling_cfg['age_range'][1]) + 1
+            ),
+            
+            # Optimized Income (Scalar Lognormal Shifts)
+            "income": np.random.lognormal(
+                mean=opt_overrides.get(f"{scenario_type}_inc_mean", sampling_cfg['income_lognormal']['mean']),
+                sigma=opt_overrides.get(f"{scenario_type}_inc_sigma", sampling_cfg['income_lognormal']['sigma'])
+            ),
+            
+            # Optimized Categorical Mix (Power-Shifted Distributions)
+            "occupation":   dynamic_sample("occupation"),
+            "entity_type":  dynamic_sample("entity_type"),
+            "risk_profile": dynamic_sample("risk_profile")
+        }
+
+        # Sync local variables for subsequent factor calculations
+        age, occ, inc = actor['age'], actor['occupation'], actor['income']
+        risk_profile, entity_type = actor['risk_profile'], actor['entity_type']
+
+
+
+
+        
+        # Formula: 0.6 if High risk or BusinessLinked, else 0.5
+        if risk_profile == 'High' or entity_type == 'BusinessLinked':
+            prob_debit = corp_cfg['prob_debit_high']
+        else:
+            prob_debit = corp_cfg['prob_debit_default']
+        
+        # Now use 'prob_debit' for your transaction generation logic
+        
+        # Logic for "age_amt"
+        age_amt = 0.8 if age < 30 else 1.0
+        
+        # Logic for "occupation_amt"
+        occupation_amt = 1.5 if occ in ['SmallBusinessOwner', 'Freelancer'] else 1.0
+        
+        # Logic for "income_amt"
+        income_amt = min(inc / multipliers['income_divisor'], 2)
+        
+        # Logic for "timing"
+        timing_occ_factor = 0.8 if occ == 'SmallBusinessOwner' else 1.0
+        timing_age_factor = 1.2 if age > 55 else 1.0
+        timing = multipliers['timing_base'] * timing_occ_factor * timing_age_factor
+
+        # Logic for "micro_max_frac"
+        #micro_max_frac = 0.05 if age < 30 else 0.1
+        micro_max_frac = micro_cfg['low_age_frac'] if age < micro_cfg['age_threshold'] else micro_cfg['default_frac']
+
+
+        # --- 1. 3D RISK MODIFIER (Retrofit) ---
+        # Consolidates Shadow Hub Centrality, Rail Switch Intensity, and Staged Escalation
+        total_risk_mod = max(1e-6,
+                         (topo['node_centrality_boost'] if actor['risk_profile'] == "High" else 1.0) * \
+                         (chan['rail_switch_intensity'] / 2.0) * \
+                         (econ['staged_escalation_factor'] if actor['entity_type'] == 'BusinessLinked' else 1.0)
+        )
+
+
+
+
+
+
+        
+        # --- 1. ACTIVE MULTIPLIER LOOKUPS (Aligned with 2026 Config) ---
+        occ_f    = get_factor(multipliers['occupation'], actor['occupation'])
+        entity_f = get_factor(multipliers['entity_type'], actor['entity_type'])
+        risk_f   = get_factor(multipliers['risk_profile'], actor['risk_profile'])
+        
+        # Age mapping based on your config: young (<30) vs senior (>55)
+        if actor['age'] < 30:
+            age_f = multipliers['age'].get('young', 1.0)
+        elif actor['age'] > 55:
+            age_f = multipliers['age'].get('senior', 1.0)
+        else:
+            age_f = 1.0
+        
+        # Income scaling using your specific divisor (50.0)
+        income_f = min(actor['income'] / multipliers.get('income_divisor', 50.0), 2.5)
+
+        # Create the Static Demographic Foundation (D_Risk)
+        D_Risk = (occ_f * entity_f * risk_f * age_f * income_f)
+
+
+
+
+
+        # --- RECONCILED LOOKUPS (BIZ_FLAG) ---
+        # We check opt_overrides for a Bayesian suggestion (e.g., 'biz_flag_personal_to_corp_occ_f')
+        # We fall back to the get_factor(multipliers[...]) if no suggestion exists
+        
+        scenario_prefix = f"{scenario_type}_" # for cleaner code below
+
+        # Optimized factor lookups using the integer index from 'actor'
+        occ_f    = opt_overrides.get(scenario_prefix + 'occ_f', 
+                                     get_factor(multipliers['occupation'], actor['occupation']))
+        
+        entity_f = opt_overrides.get(scenario_prefix + 'entity_f', 
+                                     get_factor(multipliers['entity_type'], actor['entity_type']))
+        
+        risk_f   = opt_overrides.get(scenario_prefix + 'risk_f', 
+                                     get_factor(multipliers['risk_profile'], actor['risk_profile']))
+        
+        # Age mapping uses optimized young/senior factors
+        if actor['age'] < 30:
+            age_f = opt_overrides.get(scenario_prefix + 'age_f_young', multipliers['age'].get('young', 1.0))
+        elif actor['age'] > 55:
+            age_f = opt_overrides.get(scenario_prefix + 'age_f_senior', multipliers['age'].get('senior', 1.0))
+        else:
+            age_f = 1.0
+        
+        # Income scaling uses an optimized divisor factor
+        optimized_divisor = opt_overrides.get(scenario_prefix + 'income_divisor_f', 
+                                              multipliers.get('income_divisor', 50.0))
+        income_f = min(actor['income'] / optimized_divisor, 2.5)
+
+        # Create the Static Demographic Foundation (D_Risk) using optimized factors
+        D_Risk = (occ_f * entity_f * risk_f * age_f * income_f)
+        
+        
+        # --- 2. THE 2026 TOTAL BEHAVIORAL RISK BRIDGE ---
+        # 1e-6 Safeguard prevents mathematical failure during BO trials
+        Total_Behavioral_Risk = max(1e-6, (
+            D_Risk * 
+            (topo['node_centrality_boost'] if actor['risk_profile'] == "High" else 1.0) * 
+            (chan['rail_switch_intensity'] / 2.0) * 
+            (econ['staged_escalation_factor'] if actor['entity_type'] == 'BusinessLinked' else 1.0) *
+            (1.0 + (1.0 - econ['velocity_decay_on_low_wealth']) if actor['income'] < 100 else 1.0)
+        ))
+        
+      
+        # --- 3. RECONCILED BEHAVIORAL RISK (CLEAN LOOKUPS) ---
+
+        scenario_prefix = f"{scenario_type}_"
+
+        # 1. Topological Risk (Optimizing both High and Base cases)
+        node_boost = opt_overrides.get(scenario_prefix + "node_centrality_f", topo.get('node_centrality_boost', 1.0))
+        node_base  = opt_overrides.get(scenario_prefix + "node_base_f", 1.0) # REPLACED 1.0
+        
+        # 2. Rail Logic (Optimizing intensity and divisor)
+        rail_int = opt_overrides.get(scenario_prefix + "rail_intensity_f", chan.get('rail_switch_intensity', 1.0))
+        rail_div = opt_overrides.get(scenario_prefix + "rail_divisor", 2.0)
+        
+        # 3. Escalation Logic (Optimizing Business vs. Base)
+        esc_fact = opt_overrides.get(scenario_prefix + "escalation_f", econ.get('staged_escalation_factor', 1.0))
+        esc_base = opt_overrides.get(scenario_prefix + "escalation_base_f", 1.0) # REPLACED 1.0
+        
+        # 4. Wealth Decay Logic (Optimizing Threshold and multi-stage 1.0s)
+        w_decay_f   = opt_overrides.get(scenario_prefix + "decay_wealth_f", econ.get('velocity_decay_on_low_wealth', 1.0))
+        w_threshold = opt_overrides.get(scenario_prefix + "low_wealth_threshold", 100.0)
+        
+        w_offset    = opt_overrides.get(scenario_prefix + "wealth_base_offset", 1.0)  # REPLACED 1.0
+        w_logic_sc  = opt_overrides.get(scenario_prefix + "wealth_decay_logic_f", 1.0) # REPLACED 1.0
+        w_inactive  = opt_overrides.get(scenario_prefix + "wealth_inactive_f", 1.0)    # REPLACED 1.0
+
+        # --- EXECUTION: NO HARDCODED ONES, TWOS, OR HUNDREDS ---
+        Total_Behavioral_Risk = max(1e-6, (
+            D_Risk * 
+            (node_boost if actor['risk_profile'] == "High" else node_base) * 
+            (rail_int / rail_div) * 
+            (esc_fact if actor['entity_type'] == 'BusinessLinked' else esc_base) *
+            (w_offset + (w_logic_sc - w_decay_f) if actor['income'] < w_threshold else w_inactive)
+        ))
+        
+
+
+        
+        risk_base_map = {"Low": 0.8, "Medium": 1.2, "High": 1.8}
+        profile_base = risk_base_map.get(actor['risk_profile'], 1.0)
+        
+        #if np.random.random() < 0.25:
+            #surge_factor = np.random.lognormal(mean=0.7, sigma=0.3) * total_risk_mod
+        #else:
+            #surge_factor = np.random.uniform(0.7, 1.1)
+
+        # Apply the 3D modifier to the final calculation rather than just the surge
+        base_surge = np.random.lognormal(0.7, 0.3) if np.random.random() < 0.25 else np.random.uniform(0.7, 1.1)
+        intensity = max(0.5, min(6.0, round(profile_base * base_surge * total_risk_mod, 2)))
+
+        #intensity = max(0.5, min(6.0, round(profile_base * surge_factor, 2)))
+
+
+
+
+        # 1. 2026 'Intent' Logic (25% chance of a 'Shadow MSB' burst)
+        # We use lognormal for the surge to capture the heavy-tailed nature of MSB flows
+        base_surge = np.random.lognormal(0.7, 0.3) if np.random.random() < 0.25 else np.random.uniform(0.7, 1.1)
+
+        # 2. Unified Intensity Calculation
+        # Total_Behavioral_Risk now acts as the 'Profile + Network' anchor
+        intensity = base_surge * Total_Behavioral_Risk
+
+        # 3. DYNAMIC SAFEGUARDS (Replacing hard min/max)
+        # BO suggests these bounds to find the 'Detection Phase Transition'
+        int_floor = trial.suggest_float("p2c_int_floor", 0.1, 1.0)
+        int_ceiling = trial.suggest_float("p2c_int_ceiling", 5.0, 15.0)
+
+        intensity = max(int_floor, min(int_ceiling, round(intensity, 2)))
+
+
+
+        pfx = f"{scenario_type}_"
+
+        # --- 1. OPTIMIZED 'INTENT' LOGIC (Shadow MSB Burst) ---
+        # Replacing 0.25, 0.7, 0.3, 1.1 with optimized scalars
+        msb_prob   = opt_overrides.get(f"{pfx}msb_burst_prob", 0.25)
+        msb_mean   = opt_overrides.get(f"{pfx}msb_log_mean", 0.7)
+        msb_sigma  = opt_overrides.get(f"{pfx}msb_log_sigma", 0.3)
+        
+        uni_low    = opt_overrides.get(f"{pfx}norm_uni_low", 0.7)
+        uni_high   = opt_overrides.get(f"{pfx}norm_uni_high", 1.1)
+
+        if np.random.random() < msb_prob:
+            base_surge = np.random.lognormal(msb_mean, msb_sigma)
+        else:
+            base_surge = np.random.uniform(uni_low, uni_high)
+
+        # --- 2. UNIFIED INTENSITY ---
+        intensity = base_surge * Total_Behavioral_Risk
+
+        # --- 3. DYNAMIC SAFEGUARDS ---
+        # Replacing hardcoded 0.1 and 15.0 floor/ceilings
+        int_f = opt_overrides.get(f"{pfx}int_floor", 0.1)
+        int_c = opt_overrides.get(f"{pfx}int_ceiling", 15.0)
+
+        intensity = max(int_f, min(int_c, round(intensity, 2)))
+
+
+        
+        # --- 2. 3D LABELING LOGIC ---
+        # 2026 Detection: Triggered by Intensity OR Structural Coordination (mule_cluster_density)
+        if (intensity > (2.8 / total_risk_mod)) or \
+           (actor['entity_type'] == 'BusinessLinked' and intensity > 1.8) or \
+           (topo['mule_cluster_density'] > 0.6):
+            current_label = 1
+        else:
+            current_label = 0
+
+
+        
+
+        # --- 1. DYNAMIC BEHAVIORAL THRESHOLD ---
+        # Instead of 2.8 / UBR (unstable), we use the UBR to lower the barrier linearly.
+        # High-risk BusinessLinked profiles trigger at intensity ~1.2, 
+        # while PurePersonal requires a surge > 2.8 to be labeled 'Suspicious'.
+        detection_threshold = max(1.2, 2.8 - (Total_Behavioral_Risk * 0.2))
+
+        # --- 2. MULTI-PRONGED DETECTION TRIGGERS ---
+        
+        # Trigger A: Profile-Adjusted Velocity Surge
+        is_velocity_spike = (intensity > detection_threshold)
+
+        # Trigger B: Income-to-Velocity Cap (Economic Sensibility)
+        # Using your 2026 config: 'income_to_velocity_cap': 3.2
+        # If the intensity (volume) exceeds the income-based capacity for a personal account
+        is_income_anomaly = (intensity > econ.get('income_to_velocity_cap', 3.2))
+
+        # Trigger C: Shadow Treasury Coordination (Network/Channel DNA)
+        # In 2026, high rail switching + mule cluster density is the 'Smoking Gun' for P2C MSBs
+        is_obfuscation_trigger = (topo.get('mule_cluster_density', 0) > 0.60) or \
+                                 (chan.get('rail_switch_intensity', 0) > 3.0)
+
+        # --- 3. FINAL LABEL ASSIGNMENT ---
+        if is_velocity_spike or is_income_anomaly or is_obfuscation_trigger:
+            current_label = 1
+        else:
+            current_label = 0
+
+
+
+
+        pfx = f"{scenario_type}_"
+
+        # --- 1. DYNAMIC BEHAVIORAL THRESHOLD (FULLY OPTIMIZED) ---
+        # Replacing 1.2, 2.8, and 0.2 with optimized scalars
+        d_floor = opt_overrides.get(f"{pfx}det_floor", 1.2)
+        d_int   = opt_overrides.get(f"{pfx}det_intercept", 2.8)
+        d_slope = opt_overrides.get(f"{pfx}det_slope", 0.2)
+        
+        detection_threshold = max(d_floor, d_int - (Total_Behavioral_Risk * d_slope))
+
+        # --- 2. MULTI-PRONGED DETECTION TRIGGERS ---
+        
+        # Trigger A: Profile-Adjusted Velocity Surge
+        is_velocity_spike = (intensity > detection_threshold)
+
+        # Trigger B: Income-to-Velocity Cap (Economic Sensibility)
+        inc_cap = opt_overrides.get(f"{pfx}income_cap_f", econ.get('income_to_velocity_cap', 3.2))
+        is_income_anomaly = (intensity > inc_cap)
+
+        # Trigger C: Shadow Treasury Coordination (Network/Channel DNA)
+        # Trigger C: Shadow Treasury Coordination (Optimized Inputs & Limits)
+        # We optimize the configuration value itself via a multiplier (_f)
+        mule_val   = opt_overrides.get(f"{pfx}mule_density_f", topo.get('mule_cluster_density', 0))
+        mule_limit = opt_overrides.get(f"{pfx}mule_density_limit", 0.60)
+        
+        rail_val   = opt_overrides.get(f"{pfx}rail_switch_f", chan.get('rail_switch_intensity', 0))
+        rail_limit = opt_overrides.get(f"{pfx}rail_switch_limit", 3.0)
+        
+        is_obfuscation_trigger = (mule_val > mule_limit) or (rail_val > rail_limit)
+
+        # --- 3. FINAL LABEL ASSIGNMENT ---
+        if is_velocity_spike or is_income_anomaly or is_obfuscation_trigger:
+            current_label = 1
+        else:
+            current_label = 0
+
+        
+        age_key = "senior" if actor['age'] > 50 else "young"
+        age_mult, occ_mult = multipliers['age'].get(age_key, 1.0), multipliers['occupation'].get(actor['occupation'], 1.0)
+        ent_mult, risk_mult = multipliers['entity_type'].get(actor['entity_type'], 1.0), multipliers['risk_profile'].get(actor['risk_profile'], 1.0)
+        
+        # Economic Sensibility: Income Velocity Cap
+        inc_mult = min(actor['income'] / multipliers['income_divisor'], econ['income_to_velocity_cap'])
+        n_tx = max(cfg['n_tx_min'], int(cfg['n_tx_base'] * intensity * age_mult * occ_mult * ent_mult * risk_mult))        
+
+        pfx = f"{scenario_type}_"
+
+        # --- 2. OPTIMIZED TRANSACTION VOLUME ---
+        n_min  = opt_overrides.get(f"{pfx}n_tx_min_opt", cfg.get('n_tx_min', 1))
+        n_base = opt_overrides.get(f"{pfx}n_tx_base_opt", cfg.get('n_tx_base', 10))
+        
+        # Formula uses the optimized factors directly (no defaults)
+        n_tx = max(int(n_min), int(n_base * intensity * age_f * occ_f * entity_f * risk_f)) 
+
+
+
+        amt_scalar = inc_mult * ent_mult
+
+        # --- 1. REUSE OPTIMIZED FACTORS (From Block 1 Handshake) ---
+        # Instead of age_mult/occ_mult, we use the already-derived occ_f, etc.
+        # amt_scalar used downstream in amount logic
+        amt_scalar = income_f * entity_f
+
+
+        #corporate_fraction = min(corp_cfg['base_fraction'] * corp_cfg['entity_type_factor'].get(actor['entity_type'], 1.0) * intensity, corp_cfg['max_fraction'])
+
+        # Re-add risk_frac_adj to match the Old Script's granularity
+        risk_frac_adj = corp_cfg['risk_factor'].get(actor['risk_profile'], 1.0)
+
+        # Optimized risk adjustment for corporate diversion
+        risk_frac_adj = opt_overrides.get(f"{pfx}risk_frac_adj_f", corp_cfg['risk_factor'].get(actor['risk_profile'], 1.0))
+
+        corporate_fraction = min(corp_cfg['base_fraction'] * corp_cfg['entity_type_factor'].get(actor['entity_type'], 1.0) * risk_frac_adj * intensity, corp_cfg['max_fraction'])
+
+        # --- 3. OPTIMIZED CORPORATE FRACTION ---
+        c_base_frac = opt_overrides.get(f"{pfx}corp_base_fraction_f", corp_cfg.get('base_fraction', 0.1))
+        c_max_frac  = opt_overrides.get(f"{pfx}corp_max_fraction", corp_cfg.get('max_fraction', 0.8))
+
+
+        # Optimized Entity Type Factor for corporate diversion
+        # Logic: Select the optimized parameter based on the actor's actual entity type index/label
+        if actor['entity_type'] == 'BusinessLinked' or actor['entity_type'] == 1:
+            ent_type_corp_f = opt_overrides.get(f"{pfx}ent_type_corp_f_business", 
+                                                corp_cfg['entity_type_factor'].get('BusinessLinked', 1.0))
+        else:
+            ent_type_corp_f = opt_overrides.get(f"{pfx}ent_type_corp_f_personal", 
+                                                corp_cfg['entity_type_factor'].get('PurePersonal', 1.0))
+
+        
+
+        # Final corporate_fraction calculation with zero static anchors
+        corporate_fraction = min(c_base_frac * ent_type_corp_f * risk_frac_adj * intensity, c_max_frac)
+
+        
+        k = max(1, int(n_tx * corporate_fraction * (topo['fan_out_ratio'] / 3.0 if current_label else 1.0)))
+
+        # --- 4. OPTIMIZED FAN-OUT LOGIC ---
+        f_div  = opt_overrides.get(f"{pfx}fan_out_divisor", 3.0)
+        f_base = opt_overrides.get(f"{pfx}fan_out_base_f", 1.0)
+        
+        # Use topo fan_out_ratio scaled by optimized divisor
+        fan_out_logic = (topo['fan_out_ratio'] / f_div) if current_label else f_base
+
+
+        # Optimize the topology input itself
+        f_ratio = opt_overrides.get(f"{pfx}fan_out_ratio_f", topo.get('fan_out_ratio', 1.2))
+        
+        # Use optimized fan_out_ratio scaled by optimized divisor
+        fan_out_logic = (f_ratio / f_div) if current_label else f_base
+
+        k = max(1, int(n_tx * corporate_fraction * fan_out_logic))
+
+        corporate_tx_indices = np.random.choice(range(n_tx), min(k, n_tx), replace=False)
+
+
+
+
+        t_prev = anchor
+
+
+        pfx = f"{scenario_type}_"
+
+        # --- 1. EVT RETROFIT: Dynamic Calibration for 2026 ---
+        evt_payload = extreme_value_theory(
+            tx_window, 
+            scenario_type="biz_flag_personal_to_corp",
+            #threshold_pct=trial.suggest_float("p2c_threshold_pct", 90, 98),
+            #confidence_level=trial.suggest_float("p2c_confidence", 0.99, 0.999),
+            #sample_n=trial.suggest_int("p2c_sample_n", 5, 15)
+            threshold_pct=opt_overrides.get(f"{pfx}evt_threshold_pct", 95.0),
+            confidence_level=opt_overrides.get(f"{pfx}evt_confidence", 0.99),
+            sample_n=int(opt_overrides.get(f"{pfx}evt_sample_n", 10)
+
+            
+        )
+        p2c_data = evt_payload["biz_flag_personal_to_corp"]["high_tail_outliers"]
+        evt_params = p2c_data["params"]
+
+        # --- 2. BAYESIAN STRATEGY: 'Scripted Co-mingling' ---
+        p2c_m_shift = trial.suggest_float("p2c_mean_shift", 1.1, 1.5)
+        p2c_s_scale = trial.suggest_float("p2c_sigma_scale", 0.15, 0.45)
+
+
+        # --- 2. BAYESIAN STRATEGY: 'Scripted Co-mingling' ---
+        # Optimized parameters mapped back to legacy p2c variables
+        p2c_m_shift = opt_overrides.get(f"{pfx}str_mean_shift", 1.2)
+        p2c_s_scale = opt_overrides.get(f"{pfx}str_sigma_scale", 0.3)
+
+
+
+        # 3. Global System Bounds (Standardized)
+        lower_bound = cfg['amt_min']
+        upper_bound = cfg['amt_max']
+
+        # 3. Global System Bounds (Optimized)
+        lower_bound = opt_overrides.get(f"{pfx}amt_min_opt", cfg.get('amt_min', 10.0))
+        upper_bound = opt_overrides.get(f"{pfx}amt_max_opt", cfg.get('amt_max', 10000.0))
+
+
+        # 1. Replaces econ['velocity_decay_on_low_wealth'] with the optimized variable
+        wealth_decay_factor = opt_overrides.get(f"{pfx}decay_wealth_f", 
+                                                econ.get('velocity_decay_on_low_wealth', 1.0))
+
+        # 2. Replaces multipliers['timing_base'] with the optimized variable
+        timing_base_opt = opt_overrides.get(f"{pfx}timing_base_f", 
+                                            multipliers.get('timing_base', 12.0))
+
+        amounts = []
+
+        for idx in range(n_tx):
+            # Economic Sensibility: Balance Retention Ratio (Personal use residue)
+            #amt = round(np.random.uniform(cfg['amt_min'], cfg['amt_max']) * intensity * amt_scalar * (1 - econ['balance_retention_ratio']), 2)
+
+            # Base Flow: The organic starting point scaled by income and entity factors
+            base_flow = ( (cfg['amt_min'] + cfg['amt_max']) / 2 ) * intensity * amt_scalar * (1 - econ['balance_retention_ratio'])
+
+            # --- 1. OPTIMIZED BASE FLOW ---
+            b_flow_f = opt_overrides.get(f"{pfx}base_flow_f", 0.5) # Replaces the (min+max)/2 implicit 0.5
+            retent_f = opt_overrides.get(f"{pfx}retention_f", econ.get('balance_retention_ratio', 0.1))
+            base_flow = ( (lower_bound + upper_bound) * b_flow_f ) * intensity * amt_scalar * (1 - retent_f)
+
+            
+            # --- 4. 2026 HYBRID AMOUNT LOGIC ---
+            # IF: EVT for High-Intensity Co-mingling Shocks (Anomalous Outlier)
+            #if evt_params["sigma_scale"] > 0 and (intensity > 2.8 or actor['entity_type'] == 'BusinessLinked'):
+            if evt_params["sigma_scale"] > 0 and (intensity > detection_threshold or actor['entity_type'] == 'BusinessLinked'):
+                
+                # Tail expansion driven by the 3D Risk Modifier
+                #dynamic_sigma = evt_params["sigma_scale"] * (1 + (0.12 * total_risk_mod))
+                
+                # 2026 Refinement: Total_Behavioral_Risk now drives the volatility (tail width)
+                dynamic_sigma = evt_params["sigma_scale"] * (1 + (0.12 * Total_Behavioral_Risk))
+
+                
+                # Replacing the hardcoded 1 with the optimized base
+                e_sigma_base = opt_overrides.get(f"{pfx}evt_sigma_base", 1.0)
+                r_adj = opt_overrides.get(f"{pfx}evt_risk_adj", 0.12)
+                dynamic_sigma = evt_params["sigma_scale"] * (e_sigma_base + (r_adj * Total_Behavioral_Risk))
+                
+                
+                # Tail depth linked to risk profile (High risk samples deeper into the tail)
+                tail_depth = min(0.999, 0.5 + (intensity / 12.0))
+                
+                i_div = opt_overrides.get(f"{pfx}evt_int_div", 12.0)
+                t_bas = opt_overrides.get(f"{pfx}evt_tail_base", 0.5)
+                tail_depth = min(0.999, t_bas + (intensity / i_div))
+
+                
+                u_sample = np.random.uniform(0.6, tail_depth)
+                
+                u_flr = opt_overrides.get(f"{pfx}evt_uni_floor", 0.6)
+                u_sample = np.random.uniform(u_flr, tail_depth)
+                
+                exceedance = genpareto.ppf(u_sample, evt_params["xi_shape"], loc=0, scale=dynamic_sigma)
+                # Final amount pierces personal income caps to model major capital injections
+                #amt = round(min(upper_bound * 4, base_flow + exceedance), 2)
+                amt = round( base_flow + exceedance , 2)
+
+            # ELSE: Bayesian-Tuned Co-mingling (Mechanical Facade)
+            else:
+                tuned_mu = base_flow * p2c_m_shift
+                tuned_sigma = (base_flow * 0.05) * p2c_s_scale # Contracted 5% variance
+
+                # --- 3. OPTIMIZED TRUNCATED NORMAL ---
+                v_contract = opt_overrides.get(f"{pfx}var_contract_f", 0.05)
+                tuned_sigma = (base_flow * v_contract) * p2c_s_scale
+                
+                # Z-score normalization for Truncated Normal bounds
+                a_p2c = (lower_bound - tuned_mu) / max(0.01, tuned_sigma)
+                b_p2c = (upper_bound - tuned_mu) / max(0.01, tuned_sigma)
+                
+                amt = round(truncnorm.rvs(a_p2c, b_p2c, loc=tuned_mu, scale=tuned_sigma), 2)
+
+            
+            # Channel Diversity: Rail Hopping (FAST_APAC, Stablecoin)
+            is_rail_hop = np.random.random() < chan['hop_diversification_prob']
+
+            hop_p    = opt_overrides.get(f"{pfx}hop_prob_f", chan.get('hop_diversification_prob', 0.1))
+            is_rail_hop = np.random.random() < hop_p
+
+            
+            tx_rail = np.random.choice(chan['rails']) if is_rail_hop else ('DEBIT' if idx in corporate_tx_indices else 'CREDIT')
+            
+            rows.append(_assemble_tx(acct, party_key, ref_date, t_prev, amt, tx_rail, cfg, label=current_label))
+            
+            # 3D Velocity: Latency bypass + Wealth-based decay
+            v_bypass = chan['latency_bypass_multiplier'] if is_rail_hop else 1.0
+            v_bypass = opt_overrides.get(f"{pfx}latency_bypass_f", chan.get('latency_bypass_multiplier', 1.0))
+
+            w_decay = 1.0 / econ['velocity_decay_on_low_wealth'] if actor['occupation'] == 'Retired' else 1.0
+
+            w_decay = (1.0 / wealth_decay_factor) if actor['occupation'] == 'Retired' else 1.0
+            
+            #timing_scale = (multipliers['timing_base'] / (ent_mult * risk_mult)) * v_bypass * w_decay
+
+            #amounts.append(amt)            
+            #t_prev += timedelta(hours=float(np.random.exponential(scale=max(0.1, timing_scale))))        
+
+            # Integrate 2026 total_risk_mod for sharp temporal separation
+            #risk_compression = 1.0 / total_risk_mod
+
+            # 2026 Production Update: Total_Behavioral_Risk now drives the temporal 'crunch'
+            risk_compression = 1.0 / Total_Behavioral_Risk
+                        
+            # Base timing scale incorporates the multipliers and the risk compression
+            #timing_scale = (multipliers['timing_base'] / (ent_mult * risk_mult)) * v_bypass * w_decay * risk_compression
+
+            # Refined 2026 Timing Scale (Avoiding redundant scaling)
+
+            # 2026 Optimized Timing Scale
+            # Total_Behavioral_Risk provides the 'crunch', v_bypass adds rail-speed, 
+            # and w_decay adds noise for non-professionals.
+            timing_scale = (multipliers['timing_base'] * v_bypass * w_decay * risk_compression)
+
+            timing_scale = (timing_base_opt * v_bypass * w_decay * (1.0 / Total_Behavioral_Risk))
+            
+            # Final 2026 Gap Calculation
+            # Intensity (also risk-driven) provides the final pulse speed.
+
+            amounts.append(amt)
+            
+            # Final gap: Apply exponential distribution scaled down by intensity
+            t_prev += timedelta(hours=float(max(0.05, np.random.exponential(scale=timing_scale / intensity))))
+
+            # --- OPTIMIZED TIMING PHYSICS ---
+            # Replacing 0.05 and the implicit 1.0 scale
+            t_floor = opt_overrides.get(f"{pfx}time_floor_opt", 0.05)
+            t_scale_f = opt_overrides.get(f"{pfx}time_exp_scale_f", 1.0)
+    
+            # Final delta calculation with zero hardcoded anchors
+            t_delta = max(t_floor, np.random.exponential(scale=(timing_scale / intensity) * t_scale_f))
+            t_prev += timedelta(hours=float(t_delta)
+
+        # -------------------------------
+        # 7. MICRO-TRANSACTIONS (Scaled by Nexus)
+        # -------------------------------
+     
+        #rows.extend(_generate_micro_tx(t_prev, max(amounts) * 0.1, cfg, ref_date=ref_date, label=current_label))
+
+
+        
+    rows = sorted(rows, key=lambda r: (r[0], r[2]))
+    return rows
+
+
+
+# ---------------- Scenarios (thin wrappers that read SCENARIO_CONFIG and call the engine) ----------------
+
+# ------------------ Scenario Functions (Config-Driven) ------------------
+
+
+# ------------------ Refactored Scenario Functions ------------------
+
+
+def scenario_structuring(acct, anchor, intensity=1.0, dist_params=None, party_key=None, ref_date=None):
+    params = scenario_config.get("structuring", {}).copy()
+    params["scenario_type"] = "structuring"
+    if dist_params:
+        params.update(dist_params)
+    return generate_events_from_params(acct, ref_date, anchor, intensity, params, party_key=party_key)
+
+
+def scenario_velocity_spike(acct, anchor, intensity=1.0, dist_params=None, party_key=None, ref_date=None):
+    params = scenario_config.get("velocity_spike", {}).copy()
+    params["scenario_type"] = "velocity_spike"
+    if dist_params:
+        params.update(dist_params)
+    return generate_events_from_params(acct, ref_date, anchor, intensity, params, party_key=party_key)
+
+
+def scenario_round_trip(acct, anchor, intensity=1.0, dist_params=None, party_key=None, ref_date=None):
+    params = scenario_config.get("round_trip", {}).copy()
+    params["scenario_type"] = "round_trip"
+    if dist_params:
+        params.update(dist_params)
+    return generate_events_from_params(acct, ref_date, anchor, intensity, params, party_key=party_key)
+
+
+def scenario_layering(acct, anchor, intensity=1.0, dist_params=None, party_key=None, ref_date=None):
+    params = scenario_config.get("layering", {}).copy()
+    params["scenario_type"] = "layering"
+    if dist_params:
+        params.update(dist_params)
+    return generate_events_from_params(acct, ref_date, anchor, intensity, params, party_key=party_key)
+
+
+def scenario_investment_irregularities(acct, anchor, intensity=1.0, dist_params=None, party_key=None, ref_date=None):
+    params = scenario_config.get("investment_irregularities", {}).copy()
+    params["scenario_type"] = "investment_irregularities"
+    if dist_params:
+        params.update(dist_params)
+    return generate_events_from_params(acct, ref_date, anchor, intensity, params, party_key=party_key)
+
+
+# ------------------ Biz scenarios ------------------
+
+def scenario_biz_inflow_outflow_ratio(acct, anchor, intensity=1.0, dist_params=None, party_key=None, ref_date=None):
+    params = scenario_config.get("biz_inflow_outflow_ratio", {}).copy()
+    params["scenario_type"] = "biz_inflow_outflow_ratio"
+    if dist_params:
+        params.update(dist_params)
+    return generate_events_from_params(acct, ref_date, anchor, intensity, params, party_key=party_key)
+
+
+def scenario_biz_monthly_volume_deviation(acct, anchor, intensity=1.0, dist_params=None, party_key=None, ref_date=None):
+    params = scenario_config.get("biz_monthly_volume_deviation", {}).copy()
+    params["scenario_type"] = "biz_monthly_volume_deviation"
+    if dist_params:
+        params.update(dist_params)
+    return generate_events_from_params(acct, ref_date, anchor, intensity, params, party_key=party_key)
+
+
+def scenario_biz_round_tripping(acct, anchor, intensity=1.0, dist_params=None, party_key=None, ref_date=None):
+    params = scenario_config.get("biz_round_tripping", {}).copy()
+    params["scenario_type"] = "biz_round_tripping"
+    if dist_params:
+        params.update(dist_params)
+    return generate_events_from_params(acct, ref_date, anchor, intensity, params, party_key=party_key)
+
+
+def scenario_biz_flag_non_nexus(acct, anchor, intensity=1.0, dist_params=None, party_key=None, ref_date=None):
+    params = scenario_config.get("biz_flag_non_nexus", {}).copy()
+    params["scenario_type"] = "biz_flag_non_nexus"
+    if dist_params:
+        params.update(dist_params)
+    return generate_events_from_params(acct, ref_date, anchor, intensity, params, party_key=party_key)
+
+
+def scenario_biz_flag_pep_indonesia(acct, anchor, intensity=1.0, dist_params=None, party_key=None, ref_date=None):
+    params = scenario_config.get("biz_flag_pep_indonesia", {}).copy()
+    params["scenario_type"] = "biz_flag_pep_indonesia"
+    if dist_params:
+        params.update(dist_params)
+    return generate_events_from_params(acct, ref_date, anchor, intensity, params, party_key=party_key)
+
+
+def scenario_biz_flag_personal_to_corp(acct, anchor, intensity=1.0, dist_params=None, party_key=None, ref_date=None):
+    params = scenario_config.get("biz_flag_personal_to_corp", {}).copy()
+    params["scenario_type"] = "biz_flag_personal_to_corp"
+    if dist_params:
+        params.update(dist_params)
+    return generate_events_from_params(acct, ref_date, anchor, intensity, params, party_key=party_key)
+
+    #rows.extend(_generate_micro_tx(t_prev, max(amounts), config))
+    #return rows
+
